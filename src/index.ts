@@ -34,6 +34,8 @@ if (config.trustProxy > 0) app.set('trust proxy', config.trustProxy)
 
 app.use(
   helmet({
+    // La web (zimlabstech.com) muestra la foto de perfil que sirve este servidor (server.zimlabstech.com): mismo sitio.
+    crossOriginResourcePolicy: { policy: 'same-site' },
     contentSecurityPolicy: {
       directives: {
         // Los scripts en linea de las paginas (tema antes del primer dibujo) se permiten por su hash, no en general.

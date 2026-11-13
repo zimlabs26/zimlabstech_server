@@ -22,7 +22,7 @@ export const config = {
   port: Number(process.env.PORT ?? 3000),
   /**
    * Origenes permitidos para las peticiones con cookies (la web). Admite varios separados por comas, por ejemplo
-   * "https://zimerman.greenlimetech.com,https://zimerman-web.vercel.app" mientras convivan dos direcciones.
+   * "https://zimlabstech.com,https://otra-direccion.com" si la web tiene mas de una direccion.
    */
   webOrigins: (process.env.WEB_ORIGIN ?? 'http://localhost:7777')
     .split(',')
@@ -32,7 +32,7 @@ export const config = {
   staticDir: process.env.STATIC_DIR ?? path.join(process.cwd(), 'public'),
   dbPath: process.env.DB_PATH ?? path.join(process.cwd(), 'data', 'app.db'),
   /**
-   * Cuantos proxies hay delante del servidor (Render pone uno; si ademas la web de Vercel reenvia /api, son dos).
+   * Cuantos proxies hay delante del servidor (el hosting pone uno; si ademas otro servicio reenvia /api, son dos).
    * Sin esto, detras de un proxy todas las peticiones parecen venir de la misma IP y el limite de intentos se
    * comparte entre todos. En desarrollo no hay proxy (0).
    */

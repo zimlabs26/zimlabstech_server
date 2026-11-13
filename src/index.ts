@@ -29,7 +29,7 @@ import { inlineScriptHashes, mountSite } from './site.js'
 
 const app = express()
 
-// Detras de Render (y de la web de Vercel) la IP real viene en X-Forwarded-For: se confia solo en esa cantidad de proxies.
+// Detras del proxy del hosting la IP real viene en X-Forwarded-For: se confia solo en esa cantidad de proxies.
 if (config.trustProxy > 0) app.set('trust proxy', config.trustProxy)
 
 app.use(

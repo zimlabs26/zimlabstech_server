@@ -6,11 +6,10 @@ import { config } from './config.js'
 try {
   fs.mkdirSync(path.dirname(config.dbPath), { recursive: true })
 } catch (error) {
-  // Lo mas comun en Render: DB_PATH apunta al disco persistente (/var/data) pero el disco no esta agregado al servicio.
+  // Lo mas comun: DB_PATH apunta a una carpeta que no existe o sin permisos de escritura en el hosting.
   console.error(
     `\nNo se pudo crear la carpeta de la base de datos: ${path.dirname(config.dbPath)}\n` +
-      `Revisa DB_PATH (ahora: ${config.dbPath}). Si usas un disco persistente en Render, agregalo al servicio ` +
-      `(Disks > Add Disk, Mount Path igual a la carpeta de DB_PATH).\n`,
+      `Revisa DB_PATH (ahora: ${config.dbPath}): la carpeta debe existir y tener permisos de escritura.\n`,
   )
   throw error
 }

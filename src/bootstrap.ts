@@ -2,7 +2,7 @@ import { hashPassword } from './auth/password.js'
 import { db } from './db.js'
 
 /**
- * Primera cuenta en hosting SIN consola (por ejemplo el plan gratis de Render, que no tiene Shell).
+ * Primera cuenta en hosting SIN consola (por ejemplo un hosting sin Shell).
  *
  * Si la base esta VACIA y estan definidas BOOTSTRAP_SUPER_EMAIL y BOOTSTRAP_SUPER_PASSWORD, se crea el super admin.
  * Si ya hay alguna cuenta no hace nada (por eso es seguro dejar las variables puestas, aunque conviene borrarlas

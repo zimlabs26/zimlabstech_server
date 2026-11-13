@@ -140,7 +140,7 @@ function layout(opts: { preheader: string; title: string; body: string }): strin
             ${hasLogo ? `<td style="padding-right:16px;vertical-align:middle"><img src="cid:${LOGO_CID}" width="56" height="56" alt="Zimlabs" style="display:block;width:56px;height:56px;border:0;border-radius:14px" /></td>` : ''}
             <td style="vertical-align:middle">
               <div style="font-family:${FONT};font-size:20px;font-weight:700;letter-spacing:0.24em;color:#ffffff">ZIMLABS</div>
-              <div style="font-family:${FONT};font-size:11px;font-weight:500;letter-spacing:0.32em;color:#8b93a3;margin-top:5px">DIGITAL ATELIER</div>
+              <div style="font-family:${FONT};font-size:11px;font-weight:500;letter-spacing:0.32em;color:#8b93a3;margin-top:5px">TECHNOLOGIES</div>
             </td>
           </tr></table>
         </td></tr>
@@ -148,11 +148,11 @@ function layout(opts: { preheader: string; title: string; body: string }): strin
         <tr><td style="padding:38px 32px 10px">${opts.body}</td></tr>
         <tr><td style="padding:6px 32px 30px">
           <div style="border-top:1px solid ${C.line};padding-top:20px;font-family:${FONT};font-size:12px;line-height:1.6;color:${C.muted}">
-            Este mensaje se envió automáticamente desde el CRM de Zimlabs Digital Atelier. No respondas a este correo.
+            Este mensaje se envió automáticamente desde el CRM de Zimlabs Technologies. No respondas a este correo.
           </div>
         </td></tr>
       </table>
-      <div style="padding:18px 12px 0;font-family:${FONT};font-size:12px;color:#8b93a3">© ${year} Zimlabs Digital Atelier</div>
+      <div style="padding:18px 12px 0;font-family:${FONT};font-size:12px;color:#8b93a3">© ${year} Zimlabs Technologies</div>
     </td></tr>
   </table>
 </body>
@@ -287,7 +287,7 @@ export async function sendWelcomeEmail(to: string, tempPassword: string): Promis
   const text = [
     'Hola,',
     '',
-    'Te dimos de alta en el CRM de Zimlabs Digital Atelier.',
+    'Te dimos de alta en el CRM de Zimlabs Technologies.',
     '',
     `Ingresá en: ${loginUrl}`,
     `Correo: ${to}`,
@@ -302,7 +302,7 @@ export async function sendWelcomeEmail(to: string, tempPassword: string): Promis
     title: 'Tu acceso al CRM',
     body: [
       h1('Te damos la bienvenida al CRM'),
-      p('Hola, creamos tu cuenta en el CRM de <strong>Zimlabs Digital Atelier</strong>. Con estos datos ya podés ingresar:'),
+      p('Hola, creamos tu cuenta en el CRM de <strong>Zimlabs Technologies</strong>. Con estos datos ya podés ingresar:'),
       panel([
         { label: 'Correo', value: to },
         { label: 'Contraseña temporal', value: tempPassword, mono: true },

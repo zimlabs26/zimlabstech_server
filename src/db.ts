@@ -1,4 +1,4 @@
-import Database from 'better-sqlite3'
+import { DatabaseSync } from 'node:sqlite'
 import fs from 'node:fs'
 import path from 'node:path'
 import { config } from './config.js'
@@ -15,7 +15,61 @@ try {
   throw error
 }
 
-export const db = new Database(config.dbPath)
+/**
+ * Base de datos SQLite con el modulo incluido en Node (node:sqlite), sin modulos nativos.
+ * Antes se usaba better-sqlite3, pero su binario precompilado exige una glibc mas nueva que la de Hostinger
+ * y el servidor se caia al arrancar (503). Esta capa deja la misma interfaz que usaba el resto del codigo:
+ * prepare(), exec(), pragma() y transaction().
+ */
+export interface Statement {
+  get(...params: any[]): any
+  all(...params: any[]): any[]
+  run(...params: any[]): { changes: number | bigint; lastInsertRowid: number | bigint }
+}
+
+class Db {
+  private readonly raw: DatabaseSync
+  private depth = 0
+
+  constructor(file: string) {
+    this.raw = new DatabaseSync(file)
+  }
+
+  prepare(sql: string): Statement {
+    return this.raw.prepare(sql) as unknown as Statement
+  }
+
+  exec(sql: string): void {
+    this.raw.exec(sql)
+  }
+
+  /** Devuelve las filas del PRAGMA (por ejemplo table_info), igual que better-sqlite3. */
+  pragma(source: string): any[] {
+    return this.raw.prepare(`PRAGMA ${source}`).all() as any[]
+  }
+
+  /** Envuelve la funcion en una transaccion: COMMIT si termina bien, ROLLBACK si lanza un error. Admite anidarse. */
+  transaction<A extends any[], R>(fn: (...args: A) => R): (...args: A) => R {
+    return (...args: A): R => {
+      const nested = this.depth > 0
+      const savepoint = `sp_${this.depth}`
+      this.raw.exec(nested ? `SAVEPOINT ${savepoint}` : 'BEGIN')
+      this.depth++
+      try {
+        const result = fn(...args)
+        this.depth--
+        this.raw.exec(nested ? `RELEASE ${savepoint}` : 'COMMIT')
+        return result
+      } catch (error) {
+        this.depth--
+        this.raw.exec(nested ? `ROLLBACK TO ${savepoint}; RELEASE ${savepoint}` : 'ROLLBACK')
+        throw error
+      }
+    }
+  }
+}
+
+export const db = new Db(config.dbPath)
 db.pragma('journal_mode = WAL')
 db.pragma('foreign_keys = ON')
 

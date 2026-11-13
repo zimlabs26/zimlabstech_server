@@ -348,8 +348,8 @@ clientsRouter.post('/import', sameOrigin, rateLimit({ windowMs: 15 * 60 * 1000, 
 /* ---------- Eliminar ---------- */
 
 // Cualquier usuario del CRM (todos son administradores) puede eliminar clientes, igual que crearlos o editarlos.
-// Un cliente con tareas no se puede eliminar: cada tarea debe tener cliente, asi que primero hay que borrarlas o
-// pasarlas a otro cliente.
+// Se borra todo lo del cliente en cascada: sus pagos (el historial), sus tareas, sus formularios y sus suscripciones.
+// Unica condicion: con debito automatico vigente primero hay que cancelarlo (si no, Mercado Pago seguiria cobrando).
 clientsRouter.delete('/:id', sameOrigin, rateLimit({ windowMs: 15 * 60 * 1000, max: 120 }), (req, res) => {
   const id = z.coerce.number().int().positive().safeParse(req.params.id)
   if (!id.success) {
@@ -357,27 +357,24 @@ clientsRouter.delete('/:id', sameOrigin, rateLimit({ windowMs: 15 * 60 * 1000, m
     return
   }
 
-  const { n: tasks } = db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE client_id = ?').get(id.data) as { n: number }
-  if (tasks > 0) {
-    res.status(409).json({ error: 'client_has_tasks', tasks })
-    return
-  }
-  // Con debito automatico vigente primero hay que cancelarlo (si no, Mercado Pago seguiria cobrando).
   if (liveSubscription(id.data)) {
     res.status(409).json({ error: 'client_has_subscription' })
     return
   }
-  const { n: payments } = db.prepare('SELECT COUNT(*) AS n FROM payments WHERE client_id = ?').get(id.data) as { n: number }
-  if (payments > 0) {
-    res.status(409).json({ error: 'client_has_payments', payments })
-    return
-  }
 
-  const result = db.prepare('DELETE FROM clients WHERE id = ?').run(id.data)
-  if (result.changes === 0) {
+  // payments y tasks apuntan al cliente con ON DELETE RESTRICT: se borran primero. subscriptions y forms caen solas.
+  const changes = db.transaction(() => {
+    db.prepare('DELETE FROM payments WHERE client_id = ?').run(id.data)
+    db.prepare('DELETE FROM tasks WHERE client_id = ?').run(id.data)
+    return db.prepare('DELETE FROM clients WHERE id = ?').run(id.data).changes
+  })()
+  if (changes === 0) {
     res.status(404).json({ error: 'not_found' })
     return
   }
   emit('clients', { exceptCid: res.locals.cid })
+  emit('payments', { adminsOnly: true, exceptCid: res.locals.cid })
+  emit('tasks', { adminsOnly: true, exceptCid: res.locals.cid })
+  emit('forms', { exceptCid: res.locals.cid })
   res.status(204).end()
 })

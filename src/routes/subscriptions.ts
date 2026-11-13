@@ -118,14 +118,27 @@ subscriptionsRouter.delete('/:clientId', sameOrigin, limiter, async (req, res) =
     return
   }
 
-  try {
-    await cancelPreapproval(sub.mp_id)
-  } catch (error) {
-    // Si ya no existe en Mercado Pago igual se cancela aca; cualquier otro error se informa.
-    if (!(error instanceof MpError && error.status === 404)) {
-      captureError(error, { kind: 'mercadopago', message: 'No se pudo cancelar la suscripcion en Mercado Pago', path: req.path, method: req.method })
-      res.status(502).json({ error: 'mp_error' })
-      return
+  // `?local=1`: la persona confirmo que ya la cancelo en Mercado Pago por su cuenta (ver mp_no_access abajo);
+  // en ese caso solo se da de baja en el CRM, sin llamar a Mercado Pago.
+  const localOnly = req.query.local === '1'
+
+  if (!localOnly) {
+    try {
+      await cancelPreapproval(sub.mp_id)
+    } catch (error) {
+      if (error instanceof MpError && (error.status === 401 || error.status === 403)) {
+        // El token no tiene acceso a esta suscripcion: la creo otra cuenta o aplicacion de Mercado Pago.
+        // Se avisa con un codigo propio para que el CRM ofrezca marcarla como cancelada si ya se hizo a mano.
+        captureError(error, { kind: 'mercadopago', message: 'El token de Mercado Pago no tiene acceso a la suscripcion', path: req.path, method: req.method })
+        res.status(409).json({ error: 'mp_no_access' })
+        return
+      }
+      // Si ya no existe en Mercado Pago igual se cancela aca; cualquier otro error se informa.
+      if (!(error instanceof MpError && error.status === 404)) {
+        captureError(error, { kind: 'mercadopago', message: 'No se pudo cancelar la suscripcion en Mercado Pago', path: req.path, method: req.method })
+        res.status(502).json({ error: 'mp_error' })
+        return
+      }
     }
   }
 

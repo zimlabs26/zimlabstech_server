@@ -1,7 +1,9 @@
 import crypto from 'node:crypto'
 import { Router } from 'express'
 import { z } from 'zod'
+import { config } from '../config.js'
 import { clientSearchText, db } from '../db.js'
+import { sendSalesNotice } from '../mailer.js'
 import { sameOrigin } from '../middleware/guards.js'
 import { rateLimit } from '../middleware/rateLimit.js'
 import { emit } from '../realtime.js'
@@ -52,7 +54,7 @@ quotesRouter.post('/', sameOrigin, rateLimit({ windowMs: 60 * 60 * 1000, max: 8 
     return
   }
 
-  const notes = ['Posible cliente: pidió una cotización desde la web.', q.interest ? `Quiere cotizar: ${q.interest}` : null]
+  const notes = ['Posible cliente: pidió avanzar con un proyecto desde la web.', q.interest ? `Eligió: ${q.interest}` : null]
     .filter(Boolean)
     .join('\n')
   const client = { name: q.name, company: q.company, email: q.email, phone: q.phone, notes }
@@ -76,5 +78,11 @@ quotesRouter.post('/', sameOrigin, rateLimit({ windowMs: 60 * 60 * 1000, max: 8 
 
   emit('clients')
   emit('forms')
-  res.status(201).json({ ok: true, token })
+
+  // Aviso a ventas. No se espera la respuesta del correo (puede tardar): el pedido ya quedo guardado en el CRM y
+  // sendSalesNotice nunca lanza; si el correo falla, queda en el registro del servidor.
+  void sendSalesNotice(config.salesEmail, { name: q.name, company: q.company, email: q.email, phone: q.phone, interest: q.interest })
+
+  // La web ya no lleva a la persona al formulario de necesidades: se le avisa que el equipo la va a contactar.
+  res.status(201).json({ ok: true })
 })

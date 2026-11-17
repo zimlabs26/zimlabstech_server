@@ -119,7 +119,7 @@ function note(html: string, tone: 'info' | 'warn' = 'info'): string {
 }
 
 /** Marco comun: cabecera oscura con el logo, franja azul, contenido y pie. */
-function layout(opts: { preheader: string; title: string; body: string }): string {
+function layout(opts: { preheader: string; title: string; body: string; footer?: string }): string {
   const hasLogo = logo() !== null
   const year = new Date().getFullYear()
   return `<!doctype html>
@@ -148,7 +148,7 @@ function layout(opts: { preheader: string; title: string; body: string }): strin
         <tr><td style="padding:38px 32px 10px">${opts.body}</td></tr>
         <tr><td style="padding:6px 32px 30px">
           <div style="border-top:1px solid ${C.line};padding-top:20px;font-family:${FONT};font-size:12px;line-height:1.6;color:${C.muted}">
-            Este mensaje se envió automáticamente desde el CRM de Zimlabs Technologies. No respondas a este correo.
+            ${opts.footer ?? 'Este mensaje se envió automáticamente desde el CRM de Zimlabs Technologies. No respondas a este correo.'}
           </div>
         </td></tr>
       </table>
@@ -325,5 +325,67 @@ export async function sendWelcomeEmail(to: string, tempPassword: string): Promis
     return 'sent'
   } catch (error) {
     return failure('el aviso de alta', error)
+  }
+}
+
+/**
+ * Aviso a ventas: alguien dejo sus datos en la web para contratar un plan. El Reply-To es la persona, asi que
+ * responder el correo le escribe directo. No lanza: un fallo de correo no debe impedir que el pedido quede en el CRM.
+ */
+export async function sendSalesNotice(
+  to: string,
+  lead: { name: string; company: string | null; email: string; phone: string | null; interest: string | null },
+): Promise<MailStatus> {
+  if (!transporter) {
+    console.error('[mail] no se envia el aviso a ventas: faltan las variables MAIL_USER y MAIL_PASS en el servidor')
+    return 'not_configured'
+  }
+  const when = `${now()} (hora de Argentina)`
+  const crmUrl = `${config.publicUrl}/crm#clients`
+  const rows = [
+    { label: 'Nombre', value: lead.name },
+    ...(lead.company ? [{ label: 'Empresa', value: lead.company }] : []),
+    { label: 'Correo', value: lead.email },
+    ...(lead.phone ? [{ label: 'Teléfono', value: lead.phone }] : []),
+    { label: 'Eligió', value: lead.interest ?? 'Consulta general' },
+    { label: 'Fecha', value: when },
+  ]
+  const text = [
+    'Llegó un pedido nuevo desde la web.',
+    '',
+    ...rows.map((r) => `${r.label}: ${r.value}`),
+    '',
+    'Quedó cargado como posible cliente en el CRM:',
+    crmUrl,
+    'Podés responder este correo: le llega directo a la persona.',
+  ].join('\n')
+
+  const html = layout({
+    preheader: `${lead.name} quiere avanzar con un proyecto: ${lead.interest ?? 'consulta general'}`,
+    title: 'Nuevo pedido desde la web',
+    body: [
+      h1('Nuevo pedido desde la web'),
+      p('Alguien dejó sus datos en <strong>zimlabstech.com</strong> para avanzar con un proyecto. Hay que contactarlo para darle una propuesta.'),
+      panel(rows),
+      note('Quedó cargado como <strong>posible cliente</strong> en el CRM. Podés responder este correo: le llega directo a la persona.'),
+      button(crmUrl, 'Ver en el CRM'),
+    ].join(''),
+    footer: 'Aviso automático de la web de Zimlabs Technologies.',
+  })
+
+  try {
+    await transporter.sendMail({
+      from: { name: config.mailFromName, address: config.mailUser },
+      to,
+      replyTo: { name: lead.name.replace(/[\r\n]+/g, ' '), address: lead.email },
+      // Sin saltos de linea: el nombre viene de un formulario publico.
+      subject: `Nuevo pedido de proyecto: ${lead.name.replace(/[\r\n]+/g, ' ')}`,
+      text,
+      html,
+      attachments: attachments(),
+    })
+    return 'sent'
+  } catch (error) {
+    return failure('el aviso a ventas', error)
   }
 }

@@ -1,7 +1,10 @@
 import { Router } from 'express'
 import type { SessionUser } from '../auth/sessions.js'
 import { db } from '../db.js'
-import { requireUser } from '../middleware/guards.js'
+import { captureError } from '../errorlog.js'
+import { getAccountBalance, MpError, mpEnabled, type AccountBalance } from '../mercadopago.js'
+import { requireAdmin, requireUser } from '../middleware/guards.js'
+import { costsForMonth, type ExpenseRow } from './expenses.js'
 
 export const dashboardRouter = Router()
 
@@ -127,7 +130,17 @@ dashboardRouter.get('/', (_req, res) => {
         .all(months[0], months[5]) as { m: string; total: number }[]
     ).map((r) => [r.m, r.total]),
   )
-  const monthly = months.map((m) => ({ month: m, paid: paidBy.get(m) ?? 0, expected: dueBy.get(m) ?? 0 }))
+  // Costos fijos cargados por el equipo: se restan de lo cobrado para mostrar la ganancia o la perdida de cada mes.
+  const expenseRows = db
+    .prepare('SELECT id, name, amount, frequency, start_month, end_month, note FROM expenses')
+    .all() as unknown as ExpenseRow[]
+  const monthly = months.map((m) => ({
+    month: m,
+    paid: paidBy.get(m) ?? 0,
+    expected: dueBy.get(m) ?? 0,
+    costs: costsForMonth(expenseRows, m),
+  }))
+  const costsMonth = costsForMonth(expenseRows, month)
 
   /* ---------- Requiere atencion ---------- */
 
@@ -163,11 +176,47 @@ dashboardRouter.get('/', (_req, res) => {
     clients,
     admin: {
       debits,
-      money: { collectedMonth, pending, overdue, mrr },
+      // Resultado del mes (en pesos): lo cobrado menos los costos fijos. Puede ser negativo (perdida).
+      money: { collectedMonth, pending, overdue, mrr, costsMonth, resultMonth: collectedMonth.ARS - costsMonth },
       counts: { rejected: counts.rejected ?? 0, overdue: counts.overdue ?? 0 },
       next,
       monthly,
       attention: { staleLinks, notReady },
     },
   })
+})
+
+/* ---------- Saldo de la cuenta de Mercado Pago ---------- */
+
+type BalanceReply =
+  | { status: 'ok'; balance: AccountBalance }
+  | { status: 'disabled' | 'forbidden' | 'error' }
+
+/** Solo lectura (GET): nunca mueve plata. Se guarda un minuto para no consultar a Mercado Pago en cada recarga. */
+let balanceCache: { at: number; reply: BalanceReply } | null = null
+const BALANCE_TTL_MS = 60_000
+
+dashboardRouter.get('/balance', requireAdmin, async (_req, res) => {
+  if (!mpEnabled()) {
+    res.json({ status: 'disabled' } satisfies BalanceReply)
+    return
+  }
+  if (balanceCache && Date.now() - balanceCache.at < BALANCE_TTL_MS) {
+    res.json(balanceCache.reply)
+    return
+  }
+  let reply: BalanceReply
+  try {
+    reply = { status: 'ok', balance: await getAccountBalance() }
+  } catch (error) {
+    // 401/403: Mercado Pago no habilita la consulta de saldo para esta cuenta o aplicacion (no es un fallo del servidor).
+    if (error instanceof MpError && (error.status === 401 || error.status === 403)) {
+      reply = { status: 'forbidden' }
+    } else {
+      captureError(error, { kind: 'mercadopago', message: 'No se pudo consultar el saldo de Mercado Pago', path: '/api/dashboard/balance', method: 'GET', alert: false })
+      reply = { status: 'error' }
+    }
+  }
+  balanceCache = { at: Date.now(), reply }
+  res.json(reply)
 })

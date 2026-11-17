@@ -123,3 +123,43 @@ export function verifySignature(xSignature: string | undefined, xRequestId: stri
   const received = Buffer.from(v1)
   return expected.length === received.length && crypto.timingSafeEqual(expected, received)
 }
+
+/**
+ * Cambia el monto de una suscripcion existente (PUT /preapproval/{id}): los proximos cobros salen por el monto nuevo.
+ * El cliente conserva su tarjeta. Importe en pesos (no en centavos).
+ */
+export const updatePreapprovalAmount = (id: string, amount: number): Promise<Preapproval> =>
+  mp<Preapproval>('PUT', `/preapproval/${encodeURIComponent(id)}`, {
+    auto_recurring: { transaction_amount: amount, currency_id: 'ARS' },
+  })
+
+/** Saldo de la cuenta de Mercado Pago en centavos. `available` es lo que se puede retirar o usar ya. */
+export interface AccountBalance {
+  available: number
+  unavailable: number
+  total: number
+  currency: string
+}
+
+let accountId: number | null = null
+
+/**
+ * Consulta el saldo de la cuenta duena del Access Token. Mercado Pago no documenta este endpoint y lo habilita solo
+ * para algunas cuentas y aplicaciones: sin permiso responde 401/403 (MpError) y el dashboard muestra que no esta disponible.
+ */
+export async function getAccountBalance(): Promise<AccountBalance> {
+  if (accountId === null) accountId = (await mp<{ id: number }>('GET', '/users/me')).id
+  const b = await mp<{
+    currency_id?: string
+    total_amount?: number
+    available_balance?: number
+    unavailable_balance?: number
+  }>('GET', `/users/${accountId}/mercadopago_account/balance`)
+  const cents = (n: number | undefined) => Math.round((n ?? 0) * 100)
+  return {
+    available: cents(b.available_balance),
+    unavailable: cents(b.unavailable_balance),
+    total: cents(b.total_amount ?? (b.available_balance ?? 0) + (b.unavailable_balance ?? 0)),
+    currency: b.currency_id ?? 'ARS',
+  }
+}

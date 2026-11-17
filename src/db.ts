@@ -416,3 +416,24 @@ export interface UserRow {
   totp_enabled: 0 | 1
   totp_last_step: number | null
 }
+
+// Costos fijos del negocio (hosting, dominios, herramientas, sueldos...). Importes en centavos de ARS.
+// El dashboard los resta de lo cobrado para mostrar ganancias y perdidas mes a mes.
+//  - monthly: se paga todos los meses entre `start_month` y `end_month` (NULL = sigue vigente).
+//  - yearly:  se paga una vez por ano; en el dashboard se reparte en 12 partes (un doceavo por mes) para no dar saltos.
+//  - once:    un gasto unico, cuenta solo en `start_month`.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS expenses (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    amount      INTEGER NOT NULL CHECK (amount > 0),
+    frequency   TEXT NOT NULL DEFAULT 'monthly' CHECK (frequency IN ('monthly', 'yearly', 'once')),
+    start_month TEXT NOT NULL,                   -- AAAA-MM
+    end_month   TEXT,                            -- AAAA-MM o NULL
+    note        TEXT NOT NULL DEFAULT '',
+    created_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_expenses_start ON expenses(start_month);
+`)

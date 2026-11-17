@@ -3,6 +3,8 @@ import { z } from 'zod'
 import type { SessionUser } from '../auth/sessions.js'
 import { liveSubscription, toDebit } from '../billing.js'
 import { clientSearchText, db, normalizeText } from '../db.js'
+import { captureError } from '../errorlog.js'
+import { mpEnabled, updatePreapprovalAmount } from '../mercadopago.js'
 import { requireUser, sameOrigin } from '../middleware/guards.js'
 import { rateLimit } from '../middleware/rateLimit.js'
 import { emit } from '../realtime.js'
@@ -203,7 +205,7 @@ clientsRouter.post('/', sameOrigin, rateLimit({ windowMs: 15 * 60 * 1000, max: 1
 
 /* ---------- Editar ---------- */
 
-clientsRouter.put('/:id', sameOrigin, rateLimit({ windowMs: 15 * 60 * 1000, max: 240 }), (req, res) => {
+clientsRouter.put('/:id', sameOrigin, rateLimit({ windowMs: 15 * 60 * 1000, max: 240 }), async (req, res) => {
   const id = z.coerce.number().int().positive().safeParse(req.params.id)
   const parsed = clientSchema.safeParse(req.body)
   if (!id.success) {
@@ -217,14 +219,51 @@ clientsRouter.put('/:id', sameOrigin, rateLimit({ windowMs: 15 * 60 * 1000, max:
   }
 
   const c = parsed.data
-  const result = db
-    .prepare(
-      'UPDATE clients SET name = ?, email = ?, phone = ?, company = ?, notes = ?, maintenance_plan = ?, maintenance_price = ?, maintenance_currency = ?, category = ?, search_text = ?, prospect = ? WHERE id = ?',
-    )
-    .run(
-      c.name, c.email, c.phone, c.company, c.notes, c.plan, c.plan ? c.price : null, c.currency,
-      categoryFor(c.plan), clientSearchText(c), c.prospect ? 1 : 0, id.data,
-    )
+  const newPrice = c.plan ? c.price : null
+
+  /* Con debito automatico vigente, el precio del mantenimiento es el monto que Mercado Pago cobra cada mes.
+     Si cambia (por ejemplo un aumento), se actualiza PRIMERO en Mercado Pago: si eso falla no se toca nada aca,
+     asi el CRM y Mercado Pago nunca quedan con montos distintos. */
+  const sub = liveSubscription(id.data)
+  let debitAmountChanged = false
+  if (sub) {
+    // El debito cobra un importe fijo en pesos: no se puede quitar el precio ni pasarlo a dolares mientras exista.
+    if (!newPrice || newPrice <= 0 || c.currency !== 'ARS') {
+      res.status(409).json({ error: 'debit_price_locked' })
+      return
+    }
+    if (newPrice !== sub.amount) {
+      if (!mpEnabled()) {
+        res.status(503).json({ error: 'mp_disabled' })
+        return
+      }
+      try {
+        await updatePreapprovalAmount(sub.mp_id, newPrice / 100)
+      } catch (error) {
+        captureError(error, { kind: 'mercadopago', message: 'No se pudo actualizar el monto de la suscripcion en Mercado Pago', path: req.path, method: req.method })
+        res.status(502).json({ error: 'mp_error' })
+        return
+      }
+      debitAmountChanged = true
+    }
+  }
+
+  const result = db.transaction(() => {
+    const updated = db
+      .prepare(
+        'UPDATE clients SET name = ?, email = ?, phone = ?, company = ?, notes = ?, maintenance_plan = ?, maintenance_price = ?, maintenance_currency = ?, category = ?, search_text = ?, prospect = ? WHERE id = ?',
+      )
+      .run(
+        c.name, c.email, c.phone, c.company, c.notes, c.plan, newPrice, c.currency,
+        categoryFor(c.plan), clientSearchText(c), c.prospect ? 1 : 0, id.data,
+      )
+    if (debitAmountChanged && sub && newPrice) {
+      db.prepare('UPDATE subscriptions SET amount = ? WHERE id = ?').run(newPrice, sub.id)
+      // El proximo cobro (todavia pendiente) pasa al monto nuevo; lo ya cobrado queda como historial.
+      db.prepare(`UPDATE payments SET amount = ? WHERE subscription_id = ? AND status = 'pending'`).run(newPrice, sub.id)
+    }
+    return updated
+  })()
 
   if (result.changes === 0) {
     res.status(404).json({ error: 'not_found' })
@@ -232,7 +271,8 @@ clientsRouter.put('/:id', sameOrigin, rateLimit({ windowMs: 15 * 60 * 1000, max:
   }
   const row = db.prepare(`SELECT ${columns} FROM clients WHERE id = ?`).get(id.data) as ClientRow
   emit('clients', { exceptCid: res.locals.cid })
-  res.json({ client: toClient(row) })
+  if (debitAmountChanged) emit('payments', { adminsOnly: true, exceptCid: res.locals.cid })
+  res.json({ client: toClient(row), ...(debitAmountChanged ? { debitUpdated: true } : {}) })
 })
 
 /* ---------- Exportar a CSV (copia de seguridad / planillas) ---------- */

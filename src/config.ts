@@ -49,6 +49,8 @@ export const config = {
   mailUser: process.env.MAIL_USER?.trim() ?? '',
   mailPass: (process.env.MAIL_PASS ?? '').replace(/\s+/g, ''),
   mailFromName: process.env.MAIL_FROM_NAME?.trim() || 'Zim Labs',
+  /** Casilla que recibe el aviso de cada pedido de proyecto que llega desde la web. */
+  salesEmail: process.env.SALES_EMAIL?.trim() || 'ventas@zimlabstech.com',
   cookieName: 'zsid',
   sessionDays: 7,
 } as const

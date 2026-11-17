@@ -20,6 +20,7 @@ import { dashboardRouter } from './routes/dashboard.js'
 import { errorsRouter } from './routes/errors.js'
 import { briefRouter, formsRouter } from './routes/forms.js'
 import { exportRouter } from './routes/export.js'
+import { expensesRouter } from './routes/expenses.js'
 import { reconcile } from './billing.js'
 import { paymentsRouter } from './routes/payments.js'
 import { subscriptionsRouter } from './routes/subscriptions.js'
@@ -109,6 +110,7 @@ app.use('/api/export', exportRouter)
 app.use('/api/errors', errorsRouter)
 app.use('/api/tasks', tasksRouter)
 app.use('/api/payments', paymentsRouter)
+app.use('/api/expenses', expensesRouter)
 app.use('/api/subscriptions', subscriptionsRouter)
 // Publico (lo llama Mercado Pago): cada aviso se valida con la firma del webhook.
 app.use('/api/webhooks', webhooksRouter)

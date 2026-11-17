@@ -437,3 +437,27 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_expenses_start ON expenses(start_month);
 `)
+
+// Precios editables desde el CRM y promociones. Importes en centavos de ARS.
+//  - price_overrides: precio de lista que reemplaza al que trae la web por defecto (si no hay fila, se usa el de la web).
+//  - promotions: descuento en porcentaje sobre los productos elegidos (`products` = lista JSON), con fechas opcionales.
+//    La web muestra el precio de lista tachado y el precio con descuento.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS price_overrides (
+    product    TEXT PRIMARY KEY,
+    amount     INTEGER NOT NULL CHECK (amount > 0),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS promotions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    percent    INTEGER NOT NULL CHECK (percent BETWEEN 1 AND 90),
+    products   TEXT NOT NULL,                    -- JSON: ["landing","store",...]
+    starts_on  TEXT,                             -- AAAA-MM-DD o NULL (ya empezo)
+    ends_on    TEXT,                             -- AAAA-MM-DD o NULL (sin fin)
+    active     INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+`)

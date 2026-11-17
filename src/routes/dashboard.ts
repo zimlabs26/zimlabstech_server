@@ -2,7 +2,8 @@ import { Router } from 'express'
 import type { SessionUser } from '../auth/sessions.js'
 import { db } from '../db.js'
 import { captureError } from '../errorlog.js'
-import { getAccountBalance, MpError, mpEnabled, type AccountBalance } from '../mercadopago.js'
+import { mpEnabled } from '../mercadopago.js'
+import { canRetry, getMpSummary, isStale, isSyncing, startSync, type MpSummary } from '../mpreports.js'
 import { requireAdmin, requireUser } from '../middleware/guards.js'
 import { costsForMonth, type ExpenseRow } from './expenses.js'
 
@@ -134,13 +135,16 @@ dashboardRouter.get('/', (_req, res) => {
   const expenseRows = db
     .prepare('SELECT id, name, amount, frequency, start_month, end_month, note FROM expenses')
     .all() as unknown as ExpenseRow[]
+  const mpIncome = getMpSummary()?.income ?? {}
   const monthly = months.map((m) => ({
     month: m,
-    paid: paidBy.get(m) ?? 0,
+    // Los ingresos salen de los reportes de Mercado Pago (todo lo que entro: pagos y transferencias); sin datos, de los pagos del CRM.
+    paid: mpIncome[m] ?? paidBy.get(m) ?? 0,
     expected: dueBy.get(m) ?? 0,
     costs: costsForMonth(expenseRows, m),
   }))
   const costsMonth = costsForMonth(expenseRows, month)
+  const collectedNow = mpIncome[month] ?? collectedMonth.ARS
 
   /* ---------- Requiere atencion ---------- */
 
@@ -177,7 +181,7 @@ dashboardRouter.get('/', (_req, res) => {
     admin: {
       debits,
       // Resultado del mes (en pesos): lo cobrado menos los costos fijos. Puede ser negativo (perdida).
-      money: { collectedMonth, pending, overdue, mrr, costsMonth, resultMonth: collectedMonth.ARS - costsMonth },
+      money: { collectedMonth: { ...collectedMonth, ARS: collectedNow }, pending, overdue, mrr, costsMonth, resultMonth: collectedNow - costsMonth },
       counts: { rejected: counts.rejected ?? 0, overdue: counts.overdue ?? 0 },
       next,
       monthly,
@@ -189,34 +193,32 @@ dashboardRouter.get('/', (_req, res) => {
 /* ---------- Saldo de la cuenta de Mercado Pago ---------- */
 
 type BalanceReply =
-  | { status: 'ok'; balance: AccountBalance }
-  | { status: 'disabled' | 'forbidden' | 'error' }
+  | { status: 'ok'; balance: { available: number; unavailable: number; total: number; currency: string }; asOf: string; updatedAt: string; refreshing: boolean }
+  | { status: 'syncing' | 'disabled' | 'error' }
 
-/** Solo lectura (GET): nunca mueve plata. Se guarda un minuto para no consultar a Mercado Pago en cada recarga. */
-let balanceCache: { at: number; reply: BalanceReply } | null = null
-const BALANCE_TTL_MS = 60_000
+const toReply = (s: MpSummary): BalanceReply => ({
+  status: 'ok',
+  balance: { available: s.balance, unavailable: 0, total: s.balance, currency: 'ARS' },
+  asOf: s.asOf,
+  updatedAt: s.updatedAt,
+  refreshing: isSyncing(),
+})
 
-dashboardRouter.get('/balance', requireAdmin, async (_req, res) => {
+/**
+ * Saldo disponible, leido de los reportes de Mercado Pago. Un reporte tarda varios minutos, asi que se actualiza en
+ * segundo plano: la primera vez no hay datos (status "syncing") y despues se refresca solo cada 6 horas.
+ * Es solo lectura: nunca mueve plata.
+ */
+dashboardRouter.get('/balance', requireAdmin, (_req, res) => {
   if (!mpEnabled()) {
     res.json({ status: 'disabled' } satisfies BalanceReply)
     return
   }
-  if (balanceCache && Date.now() - balanceCache.at < BALANCE_TTL_MS) {
-    res.json(balanceCache.reply)
+  const summary = getMpSummary()
+  if (isStale(summary) && canRetry()) startSync()
+  if (summary) {
+    res.json(toReply(summary))
     return
   }
-  let reply: BalanceReply
-  try {
-    reply = { status: 'ok', balance: await getAccountBalance() }
-  } catch (error) {
-    // 401/403: Mercado Pago no habilita la consulta de saldo para esta cuenta o aplicacion (no es un fallo del servidor).
-    if (error instanceof MpError && (error.status === 401 || error.status === 403)) {
-      reply = { status: 'forbidden' }
-    } else {
-      captureError(error, { kind: 'mercadopago', message: 'No se pudo consultar el saldo de Mercado Pago', path: '/api/dashboard/balance', method: 'GET', alert: false })
-      reply = { status: 'error' }
-    }
-  }
-  balanceCache = { at: Date.now(), reply }
-  res.json(reply)
+  res.json({ status: isSyncing() || canRetry() ? 'syncing' : 'error' } satisfies BalanceReply)
 })

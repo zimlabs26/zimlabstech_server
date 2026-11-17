@@ -163,3 +163,18 @@ export async function getAccountBalance(): Promise<AccountBalance> {
     currency: b.currency_id ?? 'ARS',
   }
 }
+
+/** Llamada generica a la API de Mercado Pago (JSON): la usan los reportes. */
+export function mpRequest<T>(method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown): Promise<T> {
+  return mp<T>(method, path, body)
+}
+
+/** Descarga un archivo de texto (por ejemplo el CSV de un reporte). */
+export async function mpDownload(path: string): Promise<string> {
+  const res = await fetch(`${API}${path}`, {
+    headers: { Authorization: `Bearer ${config.mpAccessToken}` },
+    signal: AbortSignal.timeout(60_000),
+  })
+  if (!res.ok) throw new MpError(res.status, null)
+  return res.text()
+}

@@ -17,6 +17,28 @@ const cleanOrigin = (value: string | undefined): string => {
   }
 }
 
+/**
+ * "https://zimlabstech.com" y "https://www.zimlabstech.com" son la misma web: si se configura una, se acepta tambien la
+ * otra. Sin esto, quien entra por la direccion con (o sin) www ve bloqueado el login por CORS. Solo se amplian los
+ * dominios "raiz" de dos partes (o el mismo con www); localhost, IPs y subdominios como server.dominio.com quedan igual.
+ */
+const withWwwVariant = (origins: string[]): string[] => {
+  const all = new Set(origins)
+  for (const origin of origins) {
+    try {
+      const url = new URL(origin)
+      if (url.hostname === 'localhost' || /^[\d.]+$/.test(url.hostname) || url.hostname.includes(':')) continue
+      const labels = url.hostname.split('.')
+      const port = url.port ? `:${url.port}` : ''
+      if (labels.length === 2) all.add(`${url.protocol}//www.${url.hostname}${port}`)
+      else if (labels.length === 3 && labels[0] === 'www') all.add(`${url.protocol}//${labels.slice(1).join('.')}${port}`)
+    } catch {
+      /* origen mal escrito: se deja como esta */
+    }
+  }
+  return [...all]
+}
+
 export const config = {
   isProd,
   port: Number(process.env.PORT ?? 3000),
@@ -24,10 +46,12 @@ export const config = {
    * Origenes permitidos para las peticiones con cookies (la web). Admite varios separados por comas, por ejemplo
    * "https://zimlabstech.com,https://otra-direccion.com" si la web tiene mas de una direccion.
    */
-  webOrigins: (process.env.WEB_ORIGIN ?? 'http://localhost:7777')
-    .split(',')
-    .map((o) => o.trim().replace(/\/$/, ''))
-    .filter(Boolean),
+  webOrigins: withWwwVariant(
+    (process.env.WEB_ORIGIN ?? 'http://localhost:7777')
+      .split(',')
+      .map((o) => o.trim().replace(/\/$/, ''))
+      .filter(Boolean),
+  ),
   /** Carpeta con la web compilada (el contenido de web/dist). Si no existe, el servidor solo responde la API. */
   staticDir: process.env.STATIC_DIR ?? path.join(process.cwd(), 'public'),
   dbPath: process.env.DB_PATH ?? path.join(process.cwd(), 'data', 'app.db'),

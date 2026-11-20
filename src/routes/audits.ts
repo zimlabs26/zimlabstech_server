@@ -4,7 +4,7 @@ import type { SessionUser } from '../auth/sessions.js'
 import { parseAuditUrl, runCheck, type AuditStatus, type CheckResult } from '../auditcheck.js'
 import { db } from '../db.js'
 import { captureError } from '../errorlog.js'
-import { requireAdmin, requireUser, sameOrigin } from '../middleware/guards.js'
+import { requireAdmin, requireSuper, requireUser, sameOrigin } from '../middleware/guards.js'
 import { rateLimit } from '../middleware/rateLimit.js'
 import { emit } from '../realtime.js'
 
@@ -352,7 +352,8 @@ function addressValues(b: Extract<Body, { ok: true }>): (string | null)[] {
 }
 const ADDRESS_COLUMNS = ['url', 'is_page', 'is_crm', 'page_url', 'crm_url', 'crm_app_url', 'crm_db_url', 'store_url', 'store_app_url', 'store_db_url']
 
-auditsRouter.post('/', requireAdmin, sameOrigin, limiter, (req, res) => {
+// Agregar, editar y borrar empresas es solo del super admin; auditar y programar es de todos los administradores.
+auditsRouter.post('/', requireSuper, sameOrigin, limiter, (req, res) => {
   const body = readBody(req.body)
   if (!body.ok) {
     res.status(400).json({ error: 'invalid_input', field: body.field })
@@ -371,7 +372,7 @@ auditsRouter.post('/', requireAdmin, sameOrigin, limiter, (req, res) => {
   void runAudit(id) // primera verificacion en segundo plano: el resultado llega por tiempo real
 })
 
-auditsRouter.put('/:id', requireAdmin, sameOrigin, limiter, (req, res) => {
+auditsRouter.put('/:id', requireSuper, sameOrigin, limiter, (req, res) => {
   const id = idSchema.safeParse(req.params.id)
   if (!id.success) {
     res.status(400).json({ error: 'invalid_input' })
@@ -413,7 +414,7 @@ auditsRouter.put('/:id', requireAdmin, sameOrigin, limiter, (req, res) => {
   if (toRun.length) void runAudit(id.data, toRun)
 })
 
-auditsRouter.delete('/:id', requireAdmin, sameOrigin, limiter, (req, res) => {
+auditsRouter.delete('/:id', requireSuper, sameOrigin, limiter, (req, res) => {
   const id = idSchema.safeParse(req.params.id)
   if (!id.success) {
     res.status(400).json({ error: 'invalid_input' })

@@ -46,13 +46,30 @@ interface AuditRow {
   page_result: string | null
   crm_result: string | null
   store_result: string | null
+  /** Programacion de esta empresa: cada cuanto se audita sola y cuando fue y sera la proxima. */
+  frequency: Frequency
+  last_run_at: string | null
+  next_run_at: string | null
 }
 
 const columns =
-  'id, name, status, logo, page_url, crm_url, crm_app_url, crm_db_url, store_url, store_app_url, store_db_url, page_result, crm_result, store_result'
+  'id, name, status, logo, page_url, crm_url, crm_app_url, crm_db_url, store_url, store_app_url, store_db_url, page_result, crm_result, store_result, frequency, last_run_at, next_run_at'
+
+/** Una capa de un CRM o tienda: su estado (null = no se pudo revisar), sus alertas y lo que tardo en responder. */
+interface Layer {
+  status: AuditStatus | null
+  alerts: string[]
+  ms: number | null
+}
+/** Las tres capas de un CRM o tienda: la web que usa la gente, el servidor y la base de datos. */
+interface Layers {
+  app: Layer | null
+  server: Layer
+  db: Layer
+}
 
 /** Ultimo resultado guardado de un servicio. */
-type StoredResult = CheckResult & { checkedAt: string }
+type StoredResult = CheckResult & { checkedAt: string; layers?: Layers }
 
 /** Direccion principal del servicio: la URL de la pagina, o la del servidor del CRM / tienda. */
 const urlOf = (r: AuditRow, kind: Kind) => (kind === 'page' ? r.page_url : kind === 'crm' ? r.crm_url : r.store_url)
@@ -85,6 +102,8 @@ const toService = (r: AuditRow, kind: Kind) => {
     sslExpiresOn: res?.sslExpiresOn ?? null,
     /** Controles revisados y cuantos salieron bien (null en las verificaciones viejas, de antes de los controles). */
     checks: res?.checks ?? null,
+    /** CRM y tienda: el estado de cada capa por separado (null en la pagina y en las verificaciones viejas). */
+    layers: res?.layers ?? null,
     checkedAt: res?.checkedAt ?? null,
   }
 }
@@ -98,6 +117,8 @@ const toAudit = (r: AuditRow) => ({
   page: toService(r, 'page'),
   crm: toService(r, 'crm'),
   store: toService(r, 'store'),
+  /** Programacion de la empresa: frecuencia, ultima auditoria completa y proxima programada (null si es manual). */
+  schedule: { frequency: r.frequency, lastRunAt: r.last_run_at, nextRunAt: r.next_run_at },
 })
 
 const idSchema = z.coerce.number().int().positive()
@@ -192,10 +213,35 @@ function overallStatus(r: AuditRow): AuditStatus | null {
 }
 
 /** Junta el resultado del frontend y el del servidor (con su base de datos) en uno solo, marcando de donde viene cada alerta. */
-function merge(app: CheckResult | null, server: CheckResult): CheckResult {
+function merge(app: CheckResult | null, server: CheckResult): CheckResult & { layers: Layers } {
   const parts: { tag: string; r: CheckResult }[] = [...(app ? [{ tag: 'app', r: app }] : []), { tag: 'srv', r: server }]
   const ssl = parts.map((p) => p.r.sslExpiresOn).filter((d): d is string => !!d).sort()[0] ?? null
+
+  // Estado de cada capa: rojo si tiene una alerta grave, amarillo si solo avisos, verde si ninguna.
+  const layerOf = (r: CheckResult, alerts: string[]): Layer => ({
+    status: alerts.some((a) => r.severe.includes(a)) ? 'red' : alerts.length ? 'yellow' : 'green',
+    alerts,
+    ms: r.responseMs,
+  })
+  const DB_ALERTS = ['db_failed', 'no_db_check']
+  const serverAlerts = server.alerts.filter((a) => !DB_ALERTS.includes(a))
+  // La base de datos se revisa a traves de la ruta de salud del servidor: si el servidor ni responde, no se pudo revisar.
+  const cannotReach = ['dns', 'refused', 'timeout', 'unreachable', 'blocked', 'ssl_invalid', 'health_failed', 'no_health', 'http_5xx']
+  const dbAlerts = server.alerts.filter((a) => DB_ALERTS.includes(a))
+  const dbStatus: AuditStatus | null = server.alerts.includes('db_failed')
+    ? 'red'
+    : server.alerts.includes('no_db_check')
+      ? 'yellow'
+      : server.alerts.some((a) => cannotReach.includes(a))
+        ? null
+        : 'green'
+  const layers: Layers = {
+    app: app ? layerOf(app, app.alerts) : null,
+    server: layerOf(server, serverAlerts),
+    db: { status: dbStatus, alerts: dbAlerts, ms: null },
+  }
   return {
+    layers,
     status: worstOf(parts.map((p) => p.r.status)) ?? 'red',
     alerts: parts.flatMap((p) => p.r.alerts.map((alert) => `${p.tag}:${alert}`)),
     detail: parts.map((p) => p.r.detail).join(' | '),
@@ -203,6 +249,7 @@ function merge(app: CheckResult | null, server: CheckResult): CheckResult {
     responseMs: server.responseMs,
     sslExpiresOn: ssl,
     checks: { passed: parts.reduce((n, p) => n + p.r.checks.passed, 0), total: parts.reduce((n, p) => n + p.r.checks.total, 0) },
+    severe: parts.flatMap((p) => p.r.severe.map((alert) => `${p.tag}:${alert}`)),
   }
 }
 
@@ -243,6 +290,14 @@ export async function runAudit(id: number, only: Kind[] = KINDS): Promise<void> 
       captureError(error, { kind: 'server', message: 'No se pudo verificar una entrada de auditoria', alert: false })
     }
   }
+  // Una auditoria completa (todos sus servicios) anota la fecha y deja programada la proxima de esa empresa.
+  if (only.length === KINDS.length) {
+    const cur = db.prepare('SELECT frequency FROM audits WHERE id = ?').get(id) as { frequency: Frequency } | undefined
+    if (cur) {
+      const now = Date.now()
+      db.prepare('UPDATE audits SET last_run_at = ?, next_run_at = ? WHERE id = ?').run(new Date(now).toISOString(), nextRunFrom(cur.frequency, now), id)
+    }
+  }
   emit('audits')
 }
 
@@ -259,14 +314,6 @@ const INTERVAL_MS: Record<Exclude<Frequency, 'manual'>, number> = {
   monthly: 30 * 86_400_000,
 }
 
-interface ScheduleRow {
-  frequency: Frequency
-  last_run_at: string | null
-  next_run_at: string | null
-}
-
-const readSchedule = () => db.prepare('SELECT frequency, last_run_at, next_run_at FROM audit_settings WHERE id = 1').get() as unknown as ScheduleRow
-const toSchedule = (s: ScheduleRow) => ({ frequency: s.frequency, lastRunAt: s.last_run_at, nextRunAt: s.next_run_at })
 const nextRunFrom = (frequency: Frequency, from = Date.now()) =>
   frequency === 'manual' ? null : new Date(from + INTERVAL_MS[frequency]).toISOString()
 
@@ -287,26 +334,36 @@ export async function runAllAudits(): Promise<boolean> {
     for (const { id } of ids) await runAudit(id)
   } finally {
     running = false
-    const s = readSchedule()
-    const now = Date.now()
-    db.prepare('UPDATE audit_settings SET last_run_at = ?, next_run_at = ? WHERE id = 1').run(new Date(now).toISOString(), nextRunFrom(s.frequency, now))
     emit('audits')
   }
   return true
 }
 
-/** Lo llama el reloj del servidor cada tanto: si ya toca la corrida programada, audita todo. */
+/**
+ * Lo llama el reloj del servidor cada tanto: audita las empresas a las que ya les toca segun SU programacion.
+ * Una empresa con programacion nueva y sin fecha todavia solo recibe su primera fecha (no se audita de golpe).
+ */
+let ticking = false
 export async function tickAuditSchedule(): Promise<void> {
+  if (ticking || running) return
+  ticking = true
   try {
-    const s = readSchedule()
-    if (s.frequency === 'manual') return
-    if (!s.next_run_at) {
-      db.prepare('UPDATE audit_settings SET next_run_at = ? WHERE id = 1').run(nextRunFrom(s.frequency))
-      return
+    const rows = db.prepare(`SELECT id, frequency, next_run_at FROM audits WHERE frequency != 'manual'`).all() as {
+      id: number
+      frequency: Frequency
+      next_run_at: string | null
+    }[]
+    for (const r of rows) {
+      if (!r.next_run_at) {
+        db.prepare('UPDATE audits SET next_run_at = ? WHERE id = ?').run(nextRunFrom(r.frequency), r.id)
+      } else if (Date.parse(r.next_run_at) <= Date.now()) {
+        await runAudit(r.id)
+      }
     }
-    if (Date.parse(s.next_run_at) <= Date.now()) await runAllAudits()
   } catch (error) {
     captureError(error, { kind: 'server', message: 'No se pudo correr la auditoria programada', alert: false })
+  } finally {
+    ticking = false
   }
 }
 
@@ -314,19 +371,25 @@ export async function tickAuditSchedule(): Promise<void> {
 
 auditsRouter.get('/', (_req, res) => {
   const rows = db.prepare(`SELECT ${columns} FROM audits ORDER BY name COLLATE NOCASE`).all() as unknown as AuditRow[]
-  res.json({ audits: rows.map(toAudit), schedule: toSchedule(readSchedule()), running })
+  res.json({ audits: rows.map(toAudit), running })
 })
 
-/** Cambiar la programacion (administradores). La proxima corrida se cuenta desde ahora. */
-auditsRouter.put('/schedule', requireAdmin, sameOrigin, limiter, (req, res) => {
+/** Programar la auditoria de UNA empresa (todos los administradores). La proxima se cuenta desde ahora. */
+auditsRouter.put('/:id/schedule', requireAdmin, sameOrigin, limiter, (req, res) => {
+  const id = idSchema.safeParse(req.params.id)
   const body = z.object({ frequency: z.enum(FREQUENCIES) }).strict().safeParse(req.body)
-  if (!body.success) {
+  if (!id.success || !body.success) {
     res.status(400).json({ error: 'invalid_input' })
     return
   }
-  db.prepare('UPDATE audit_settings SET frequency = ?, next_run_at = ? WHERE id = 1').run(body.data.frequency, nextRunFrom(body.data.frequency))
+  const result = db.prepare('UPDATE audits SET frequency = ?, next_run_at = ? WHERE id = ?').run(body.data.frequency, nextRunFrom(body.data.frequency), id.data)
+  if (result.changes === 0) {
+    res.status(404).json({ error: 'not_found' })
+    return
+  }
+  const row = db.prepare(`SELECT ${columns} FROM audits WHERE id = ?`).get(id.data) as unknown as AuditRow
   emit('audits', { exceptCid: res.locals.cid })
-  res.json({ schedule: toSchedule(readSchedule()) })
+  res.json({ audit: toAudit(row) })
 })
 
 /** Auditar todo ahora: responde enseguida y el avance llega por tiempo real. */

@@ -300,7 +300,9 @@ function saveServices(clientId: number, services: NonNullable<z.infer<typeof cli
     'INSERT INTO client_services (client_id, product, status, price, currency, discount_percent, discount_months) VALUES (?, ?, ?, ?, ?, ?, ?)',
   )
   for (const s of services) {
-    insert.run(clientId, s.product, s.status, s.price, s.currency, s.discountPercent, s.discountPercent ? s.discountMonths : null)
+    // Solo los mantenimientos (que se cobran todos los meses) llevan descuento; un proyecto se vende a su precio de lista.
+    const percent = s.product.startsWith('maint_') ? s.discountPercent : 0
+    insert.run(clientId, s.product, s.status, s.price, s.currency, percent, percent ? s.discountMonths : null)
   }
 }
 

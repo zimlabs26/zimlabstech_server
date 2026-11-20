@@ -37,6 +37,8 @@ export interface CheckResult {
   sslExpiresOn: string | null
   /** Controles revisados y cuantos salieron bien. */
   checks: { passed: number; total: number }
+  /** Las alertas que son graves (rojo); las demas son avisos (amarillo). */
+  severe: string[]
 }
 
 const TIMEOUT_MS = 8_000
@@ -201,7 +203,7 @@ function errorCode(error: unknown): string {
 const day = (d: Date) => d.toISOString().slice(0, 10)
 
 const fail = (code: string, detail: string): CheckResult => ({
-  status: 'red', alerts: [code], detail, httpStatus: null, responseMs: null, sslExpiresOn: null, checks: { passed: 0, total: 1 },
+  status: 'red', alerts: [code], detail, httpStatus: null, responseMs: null, sslExpiresOn: null, checks: { passed: 0, total: 1 }, severe: [code],
 })
 
 /** Direcciones del mismo sitio que la pagina necesita para funcionar: scripts y estilos (esenciales) e imagenes. */
@@ -358,5 +360,6 @@ export async function runCheck(rawUrl: string, kind: AuditKind = 'page', healthU
     responseMs: hop.ms,
     sslExpiresOn: hop.certExpires ? day(hop.certExpires) : null,
     checks: { passed: checks.length - failed.length, total: checks.length },
+    severe: [...new Set(failed.filter((c) => c.red).map((c) => c.alert).filter((a): a is string => !!a))],
   }
 }

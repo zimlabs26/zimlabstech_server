@@ -322,6 +322,8 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_client_services_client ON client_services(client_id);
 `)
+// Un descuento solo tiene sentido en un mantenimiento: si algun proyecto lo traia, vuelve a su precio de lista.
+db.exec(`UPDATE client_services SET discount_percent = 0, discount_months = NULL WHERE product NOT LIKE 'maint\\_%' ESCAPE '\\' AND discount_percent > 0`)
 if (!hadClientServices) {
   // Lo que ya estaba cargado: el plan de mantenimiento de cada cliente pasa a ser un servicio de mantenimiento
   // (cliente si ya lo era, posible cliente si no). Si no tenia precio cotizado se usa el de la lista por defecto.
@@ -426,6 +428,20 @@ if (!(db.pragma('table_info(audits)') as { name: string }[]).some((c) => c.name 
   }
 }
 
+// Programacion de la auditoria POR EMPRESA: cada una tiene su frecuencia (`manual` = nunca, solo a pedido), su ultima
+// auditoria completa y la proxima programada. Las que ya existian heredan la programacion que tenia toda la auditoria.
+let inheritAuditSchedule = false
+{
+  const have = new Set((db.pragma('table_info(audits)') as { name: string }[]).map((c) => c.name))
+  if (!have.has('frequency')) {
+    db.exec(`ALTER TABLE audits ADD COLUMN frequency TEXT NOT NULL DEFAULT 'daily' CHECK (frequency IN ('manual', 'daily', 'weekly', 'biweekly', 'monthly'))`)
+    db.exec('ALTER TABLE audits ADD COLUMN last_run_at TEXT')
+    db.exec('ALTER TABLE audits ADD COLUMN next_run_at TEXT')
+    inheritAuditSchedule = true // se completa mas abajo, cuando ya existe audit_settings
+  }
+}
+
+// (Antes la programacion era una sola para toda la auditoria; la tabla queda porque la ruta de salud tambien la usa.)
 // Programacion de la auditoria (una sola fila): cada cuanto se audita todo solo. `manual` = nunca, solo a pedido.
 db.exec(`
   CREATE TABLE IF NOT EXISTS audit_settings (
@@ -436,6 +452,12 @@ db.exec(`
   );
   INSERT OR IGNORE INTO audit_settings (id) VALUES (1);
 `)
+// Las empresas que ya estaban toman la programacion global que tenian (solo la primera vez, cuando se crean las columnas).
+if (inheritAuditSchedule) {
+  db.exec(`UPDATE audits SET frequency = (SELECT frequency FROM audit_settings WHERE id = 1),
+                             last_run_at = (SELECT last_run_at FROM audit_settings WHERE id = 1),
+                             next_run_at = (SELECT next_run_at FROM audit_settings WHERE id = 1)`)
+}
 
 // Una entrada puede tener los dos servicios: la URL de la pagina y/o la direccion del servidor del CRM. Cada uno guarda su
 // ultimo resultado (JSON con estado, alertas, detalle, tiempos y certificado); `status` queda como el peor de los dos.

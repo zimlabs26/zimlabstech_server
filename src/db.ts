@@ -273,29 +273,43 @@ for (const col of ['country', 'tax_id']) {
   if (!clientColumns.some((c) => c.name === col)) db.exec(`ALTER TABLE clients ADD COLUMN ${col} TEXT`)
 }
 
-// Codigo de cliente: las 3 primeras letras de la empresa (o del contacto si no tiene empresa) y el numero de cliente
-// con ceros, por ejemplo PAN0007. Se asigna al crear el cliente y no cambia si despues se edita el nombre.
+// Codigo de cliente: las 3 letras del pais (ISO 3166 alfa-3: ARG, USA, MEX...) y el numero interno de cliente con ceros,
+// por ejemplo ARG0007. Si el cliente todavia no tiene pais lleva XXX y, al elegirle el pais, el codigo se corrige.
 if (!clientColumns.some((c) => c.name === 'code')) db.exec('ALTER TABLE clients ADD COLUMN code TEXT')
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_code ON clients(code)')
 
-export function clientCode(label: string, id: number): string {
-  const letters = normalizeText(label).replace(/[^a-z]/g, '').slice(0, 3).toUpperCase().padEnd(3, 'X')
-  return `${letters}${String(id).padStart(4, '0')}`
+/** Latinoamerica y Estados Unidos: codigo de 2 letras (el que guarda la ficha) a codigo de 3 letras (el del cliente). */
+const COUNTRY_CODE3: Record<string, string> = {
+  AR: 'ARG', BO: 'BOL', BR: 'BRA', CL: 'CHL', CO: 'COL', CR: 'CRI', CU: 'CUB', DO: 'DOM', EC: 'ECU', SV: 'SLV', GT: 'GTM',
+  HT: 'HTI', HN: 'HND', MX: 'MEX', NI: 'NIC', PA: 'PAN', PY: 'PRY', PE: 'PER', PR: 'PRI', UY: 'URY', VE: 'VEN', US: 'USA',
 }
 
-/** Da codigo a los clientes que todavia no lo tienen (los que ya existian, los de la importacion y los de la web). */
+export function clientCode(country: string | null, id: number): string {
+  return `${(country && COUNTRY_CODE3[country]) || 'XXX'}${String(id).padStart(4, '0')}`
+}
+
+/**
+ * Deja a TODOS los clientes con su codigo al dia: el pais y el numero interno (los que ya existian con otro formato, los de
+ * la importacion y los de la web). Corre al arrancar y despues de crear clientes por fuera del formulario.
+ */
 export function fillClientCodes(): void {
-  const rows = db.prepare('SELECT id, name, company FROM clients WHERE code IS NULL').all() as {
+  const rows = db.prepare('SELECT id, name, company, email, phone, notes, country, code FROM clients').all() as {
     id: number
     name: string
     company: string | null
+    email: string | null
+    phone: string | null
+    notes: string | null
+    country: string | null
+    code: string | null
   }[]
-  if (!rows.length) return
-  const update = db.prepare('UPDATE clients SET code = ?, search_text = search_text || ? WHERE id = ?')
+  const stale = rows.filter((r) => r.code !== clientCode(r.country, r.id))
+  if (!stale.length) return
+  const update = db.prepare('UPDATE clients SET code = ?, search_text = ? WHERE id = ?')
   db.transaction(() => {
-    for (const r of rows) {
-      const code = clientCode(r.company || r.name, r.id)
-      update.run(code, ` ${code.toLowerCase()}`, r.id)
+    for (const r of stale) {
+      const code = clientCode(r.country, r.id)
+      update.run(code, clientSearchText({ ...r, code }), r.id)
     }
   })()
 }

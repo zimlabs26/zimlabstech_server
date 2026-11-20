@@ -329,7 +329,7 @@ clientsRouter.post('/', sameOrigin, rateLimit({ windowMs: 15 * 60 * 1000, max: 1
       )
     const clientId = Number(result.lastInsertRowid)
     // El codigo lleva el numero de cliente, que recien se conoce al insertar; tambien se puede buscar por el.
-    const code = clientCode(c.company || c.name, clientId)
+    const code = clientCode(c.country, clientId)
     db.prepare('UPDATE clients SET code = ?, search_text = search_text || ? WHERE id = ?').run(code, ` ${code.toLowerCase()}`, clientId)
     if (c.services) saveServices(clientId, c.services)
     return clientId
@@ -360,8 +360,8 @@ clientsRouter.put('/:id', sameOrigin, rateLimit({ windowMs: 15 * 60 * 1000, max:
   const d = derive(c)
   const newPrice = d.plan ? d.price : null
   const taxId = c.country === 'AR' && c.taxId ? normalizeCuil(c.taxId) : null
-  // El codigo no cambia al editar; se conserva en el texto de busqueda.
-  const currentCode = (db.prepare('SELECT code FROM clients WHERE id = ?').get(id.data) as { code: string | null } | undefined)?.code ?? null
+  // El codigo es el del pais (3 letras) y el numero interno: si se cambia el pais, el codigo se corrige.
+  const newCode = clientCode(c.country, id.data)
 
   /* Con debito automatico vigente, el precio del mantenimiento es el monto que Mercado Pago cobra cada mes.
      Si cambia (por ejemplo un aumento), se actualiza PRIMERO en Mercado Pago: si eso falla no se toca nada aca,
@@ -397,11 +397,11 @@ clientsRouter.put('/:id', sameOrigin, rateLimit({ windowMs: 15 * 60 * 1000, max:
   const result = db.transaction(() => {
     const updated = db
       .prepare(
-        'UPDATE clients SET name = ?, email = ?, phone = ?, company = ?, notes = ?, maintenance_plan = ?, maintenance_price = ?, maintenance_currency = ?, category = ?, search_text = ?, prospect = ?, country = ?, tax_id = ? WHERE id = ?',
+        'UPDATE clients SET name = ?, email = ?, phone = ?, company = ?, notes = ?, maintenance_plan = ?, maintenance_price = ?, maintenance_currency = ?, category = ?, search_text = ?, prospect = ?, country = ?, tax_id = ?, code = ? WHERE id = ?',
       )
       .run(
         c.name, c.email, c.phone, c.company, c.notes, d.plan, newPrice, d.currency,
-        categoryFor(d.plan), clientSearchText({ ...c, code: currentCode }), d.prospect ? 1 : 0, c.country, taxId, id.data,
+        categoryFor(d.plan), clientSearchText({ ...c, code: newCode }), d.prospect ? 1 : 0, c.country, taxId, newCode, id.data,
       )
     if (updated.changes > 0 && c.services) saveServices(id.data, c.services)
     if (debitAmountChanged && sub && newPrice) {

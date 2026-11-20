@@ -59,7 +59,7 @@ quotesRouter.post('/', sameOrigin, rateLimit({ windowMs: 60 * 60 * 1000, max: 8 
   db.prepare(
     "INSERT INTO clients (name, email, phone, company, notes, category, search_text, created_by, prospect) VALUES (?, ?, ?, ?, ?, 'bronze', ?, NULL, 1)",
   ).run(client.name, client.email, client.phone, client.company, client.notes, clientSearchText(client))
-  fillClientCodes() // el posible cliente recibe su codigo (3 letras de la empresa y su numero)
+  fillClientCodes() // el posible cliente recibe su codigo (XXX hasta que se le elija el pais, y su numero)
 
   emit('clients')
 

@@ -322,6 +322,28 @@ for (const [name, type] of [
   if (!subscriptionColumns.some((c) => c.name === name)) db.exec(`ALTER TABLE subscriptions ADD COLUMN ${name} ${type}`)
 }
 
+// Auditoria: paginas y CRM armados por el equipo, que el servidor consulta cada tanto.
+//  - status: green (todo bien), yellow (bien pero con alertas) o red (paso algo); NULL = todavia sin verificar.
+//  - alerts: lista JSON de codigos de alerta (ver auditcheck.ts); detail: resumen corto de la ultima verificacion.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS audits (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    name           TEXT NOT NULL,
+    url            TEXT NOT NULL,
+    is_page        INTEGER NOT NULL DEFAULT 0 CHECK (is_page IN (0, 1)),
+    is_crm         INTEGER NOT NULL DEFAULT 0 CHECK (is_crm IN (0, 1)),
+    status         TEXT CHECK (status IN ('green', 'yellow', 'red')),
+    alerts         TEXT NOT NULL DEFAULT '[]',
+    detail         TEXT NOT NULL DEFAULT '',
+    http_status    INTEGER,
+    response_ms    INTEGER,
+    ssl_expires_on TEXT,                          -- AAAA-MM-DD
+    checked_at     TEXT,
+    created_by     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+`)
+
 // Cada cobro automatico pertenece a una suscripcion; `rejected` marca el intento que el banco rechazo (sigue pendiente).
 const paymentColumns = db.pragma('table_info(payments)') as { name: string }[]
 if (!paymentColumns.some((c) => c.name === 'subscription_id')) {

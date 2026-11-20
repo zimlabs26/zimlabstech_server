@@ -23,6 +23,7 @@ import { exportRouter } from './routes/export.js'
 import { expensesRouter } from './routes/expenses.js'
 import { pricingRouter, promotionsRouter } from './routes/promotions.js'
 import { reconcile } from './billing.js'
+import { auditsRouter, checkAllAudits } from './routes/audits.js'
 import { paymentsRouter } from './routes/payments.js'
 import { subscriptionsRouter } from './routes/subscriptions.js'
 import { tasksRouter } from './routes/tasks.js'
@@ -115,6 +116,7 @@ app.use('/api/expenses', expensesRouter)
 app.use('/api/pricing', pricingRouter) // publico: lo que muestra la web
 app.use('/api/promotions', promotionsRouter)
 app.use('/api/subscriptions', subscriptionsRouter)
+app.use('/api/audits', auditsRouter)
 // Publico (lo llama Mercado Pago): cada aviso se valida con la firma del webhook.
 app.use('/api/webhooks', webhooksRouter)
 
@@ -164,6 +166,9 @@ setInterval(purgeExpiredSessions, 60 * 60 * 1000).unref()
 // Debito automatico: conciliacion de respaldo con Mercado Pago (por si se perdio algun aviso): al arrancar y cada hora.
 setTimeout(() => void reconcile(), 30_000).unref()
 setInterval(() => void reconcile(), 60 * 60 * 1000).unref()
+// Auditoria: se verifican las paginas y CRM cargados al arrancar y despues cada 10 minutos.
+setTimeout(() => void checkAllAudits(), 45_000).unref()
+setInterval(() => void checkAllAudits(), 10 * 60 * 1000).unref()
 
 app.listen(config.port, () => {
   console.log(`Server escuchando en http://localhost:${config.port}`)

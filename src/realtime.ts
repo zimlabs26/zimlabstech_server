@@ -13,6 +13,7 @@ export type RealtimeType =
   | 'tasks' // cambio el tablero de tareas (solo administradores)
   | 'payments' // cambio la lista de pagos (solo administradores)
   | 'admins' // cambio la lista de administradores (solo administradores)
+  | 'audits' // cambio la lista de auditoria o el estado de alguna entrada (todos los usuarios)
   | 'profile' // cambio el perfil, el idioma o el tema de la cuenta
   | 'sessions' // cambiaron las sesiones abiertas de la cuenta
   | 'session-ended' // esta sesion se cerro (cuenta suspendida, baneada, eliminada o sesion revocada)

@@ -14,7 +14,7 @@ import { rateLimit } from '../middleware/rateLimit.js'
  * Importes en centavos de ARS.
  */
 
-export const PRODUCTS = ['landing', 'page', 'crmb', 'crmf', 'store', 'app', 'maint_store', 'maint_crm'] as const
+export const PRODUCTS = ['landing', 'page', 'crmb', 'crmf', 'store', 'app', 'maint_store', 'maint_crm', 'maint_crmb', 'maint_page'] as const
 export type Product = (typeof PRODUCTS)[number]
 
 /** Precios de lista por defecto: los mismos que trae la web si nadie los cambia desde el CRM. */
@@ -27,6 +27,8 @@ export const DEFAULT_PRICE: Record<Product, number> = {
   app: 71_865_000,
   maint_store: 9_568_200,
   maint_crm: 12_398_300,
+  maint_crmb: 9_568_200, // CRM basico: mismo valor que el mantenimiento de tienda
+  maint_page: 6_578_800,
 }
 
 interface PromoRow {

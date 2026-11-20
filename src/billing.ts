@@ -1,11 +1,13 @@
 import { db } from './db.js'
 import { captureError } from './errorlog.js'
 import {
+  cancelPreapproval,
   getAuthorizedPayment,
   getPreapproval,
   listAuthorizedPayments,
   MpError,
   mpEnabled,
+  updatePreapprovalAmount,
   type AuthorizedPayment,
 } from './mercadopago.js'
 import { emit } from './realtime.js'
@@ -26,9 +28,20 @@ export interface SubscriptionRow {
   amount: number
   init_point: string | null
   next_payment_date: string | null
+  /** Valor normal (centavos) cuando hay promocion; NULL si no la hay. `amount` es lo que se cobra hoy. */
+  full_amount: number | null
+  promo_percent: number | null
+  promo_months: number | null
+  /** Cantidad de cobros en total: al cumplirse, la suscripcion se da de baja. NULL = sin fin. */
+  term_months: number | null
+  promo_ended: 0 | 1
 }
 
-const columns = 'id, client_id, mp_id, status, amount, init_point, next_payment_date'
+const columns =
+  'id, client_id, mp_id, status, amount, init_point, next_payment_date, full_amount, promo_percent, promo_months, term_months, promo_ended'
+
+/** Precio con descuento, en pesos enteros (centavos multiplo de 100), igual que el de las promociones de la lista. */
+export const discounted = (fullCents: number, percent: number): number => Math.round((fullCents * (100 - percent)) / 10_000) * 100
 /** Pausa entre suscripciones durante la conciliacion. */
 const RECONCILE_PAUSE_MS = 1500
 const nowSql = `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
@@ -38,6 +51,18 @@ export const toDebit = (s: SubscriptionRow) => ({
   status: s.status,
   link: s.status === 'pending' ? s.init_point : null,
   nextPaymentDate: s.next_payment_date,
+  /** Promocion y plazo (null = sin ninguno de los dos). Importes en centavos. */
+  promo:
+    s.term_months || s.promo_percent
+      ? {
+          percent: s.promo_percent,
+          promoMonths: s.promo_months,
+          termMonths: s.term_months,
+          ended: s.promo_ended === 1,
+          amount: s.amount,
+          fullAmount: s.full_amount ?? s.amount,
+        }
+      : null,
 })
 
 /** Suscripcion vigente (no cancelada) de un cliente. */
@@ -86,8 +111,48 @@ export async function syncSubscription(mpId: string): Promise<void> {
     }
   })()
 
+  // Un fallo aca no debe perder la sincronizacion: la conciliacion de cada hora lo reintenta.
+  try {
+    await applySchedule(mpId)
+  } catch (error) {
+    captureError(error, { kind: 'mercadopago', message: 'No se pudo aplicar la promocion o el plazo de la suscripcion' })
+  }
+
   emit('payments', { adminsOnly: true })
   emit('clients')
+}
+
+/**
+ * Promocion y plazo de la suscripcion, segun los cobros APROBADOS (no segun fechas: si un cobro se rechaza o se atrasa,
+ * el mes promocional no se pierde).
+ *  - Al cumplirse `promo_months` cobros: el monto vuelve al valor normal (en Mercado Pago y en el CRM).
+ *  - Al cumplirse `term_months` cobros: la suscripcion se cancela y lo pendiente deja de ser deuda.
+ * Es idempotente: si Mercado Pago falla, no se toca nada aca y se reintenta en la proxima sincronizacion.
+ */
+async function applySchedule(mpId: string): Promise<void> {
+  const sub = byMpId(mpId)
+  if (!sub || sub.status !== 'authorized' || !mpEnabled()) return
+  const paid = (
+    db.prepare(`SELECT COUNT(*) AS n FROM payments WHERE subscription_id = ? AND status = 'paid'`).get(sub.id) as { n: number }
+  ).n
+
+  if (sub.term_months && paid >= sub.term_months) {
+    await cancelPreapproval(sub.mp_id)
+    db.transaction(() => {
+      db.prepare(`UPDATE subscriptions SET status = 'cancelled' WHERE id = ?`).run(sub.id)
+      db.prepare(`DELETE FROM payments WHERE subscription_id = ? AND status = 'pending'`).run(sub.id)
+    })()
+    return
+  }
+
+  if (sub.promo_percent && sub.promo_months && sub.full_amount && !sub.promo_ended && paid >= sub.promo_months) {
+    await updatePreapprovalAmount(sub.mp_id, sub.full_amount / 100)
+    db.transaction(() => {
+      db.prepare('UPDATE subscriptions SET amount = ?, promo_ended = 1 WHERE id = ?').run(sub.full_amount, sub.id)
+      // El proximo cobro (ya pendiente) pasa al valor normal; lo cobrado queda como historial.
+      db.prepare(`UPDATE payments SET amount = ? WHERE subscription_id = ? AND status = 'pending'`).run(sub.full_amount, sub.id)
+    })()
+  }
 }
 
 /** Registra un cobro de la suscripcion (aprobado o rechazado) en "Pagos". No consulta nada a Mercado Pago. */

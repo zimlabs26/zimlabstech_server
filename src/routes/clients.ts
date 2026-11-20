@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import type { SessionUser } from '../auth/sessions.js'
-import { liveSubscription, toDebit } from '../billing.js'
+import { discounted, liveSubscription, toDebit } from '../billing.js'
 import { clientSearchText, db, normalizeText } from '../db.js'
 import { captureError } from '../errorlog.js'
 import { mpEnabled, updatePreapprovalAmount } from '../mercadopago.js'
@@ -225,6 +225,8 @@ clientsRouter.put('/:id', sameOrigin, rateLimit({ windowMs: 15 * 60 * 1000, max:
      Si cambia (por ejemplo un aumento), se actualiza PRIMERO en Mercado Pago: si eso falla no se toca nada aca,
      asi el CRM y Mercado Pago nunca quedan con montos distintos. */
   const sub = liveSubscription(id.data)
+  /** Lo que se cobra hoy por un precio normal dado: con la promocion vigente lleva su descuento. */
+  const chargeNow = (price: number) => (sub?.promo_percent && !sub.promo_ended ? discounted(price, sub.promo_percent) : price)
   let debitAmountChanged = false
   if (sub) {
     // El debito cobra un importe fijo en pesos: no se puede quitar el precio ni pasarlo a dolares mientras exista.
@@ -232,13 +234,15 @@ clientsRouter.put('/:id', sameOrigin, rateLimit({ windowMs: 15 * 60 * 1000, max:
       res.status(409).json({ error: 'debit_price_locked' })
       return
     }
-    if (newPrice !== sub.amount) {
+    // Con promocion, `amount` es lo que se cobra hoy (con descuento) y el precio del cliente es el valor normal.
+    const listPrice = sub.full_amount ?? sub.amount
+    if (newPrice !== listPrice) {
       if (!mpEnabled()) {
         res.status(503).json({ error: 'mp_disabled' })
         return
       }
       try {
-        await updatePreapprovalAmount(sub.mp_id, newPrice / 100)
+        await updatePreapprovalAmount(sub.mp_id, chargeNow(newPrice) / 100)
       } catch (error) {
         captureError(error, { kind: 'mercadopago', message: 'No se pudo actualizar el monto de la suscripcion en Mercado Pago', path: req.path, method: req.method })
         res.status(502).json({ error: 'mp_error' })
@@ -258,9 +262,14 @@ clientsRouter.put('/:id', sameOrigin, rateLimit({ windowMs: 15 * 60 * 1000, max:
         categoryFor(c.plan), clientSearchText(c), c.prospect ? 1 : 0, id.data,
       )
     if (debitAmountChanged && sub && newPrice) {
-      db.prepare('UPDATE subscriptions SET amount = ? WHERE id = ?').run(newPrice, sub.id)
+      const charge = chargeNow(newPrice)
+      db.prepare('UPDATE subscriptions SET amount = ?, full_amount = CASE WHEN full_amount IS NULL THEN NULL ELSE ? END WHERE id = ?').run(
+        charge,
+        newPrice,
+        sub.id,
+      )
       // El proximo cobro (todavia pendiente) pasa al monto nuevo; lo ya cobrado queda como historial.
-      db.prepare(`UPDATE payments SET amount = ? WHERE subscription_id = ? AND status = 'pending'`).run(newPrice, sub.id)
+      db.prepare(`UPDATE payments SET amount = ? WHERE subscription_id = ? AND status = 'pending'`).run(charge, sub.id)
     }
     return updated
   })()

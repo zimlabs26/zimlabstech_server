@@ -309,6 +309,19 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_subscriptions_client ON subscriptions(client_id);
 `)
 
+// Promocion de la suscripcion: los primeros `promo_months` cobros salen con `promo_percent`% de descuento y despues vuelve
+// al valor normal (`full_amount`, en centavos); a los `term_months` cobros se da de baja. Todo NULL = sin promocion ni plazo.
+const subscriptionColumns = db.pragma('table_info(subscriptions)') as { name: string }[]
+for (const [name, type] of [
+  ['full_amount', 'INTEGER'],
+  ['promo_percent', 'INTEGER'],
+  ['promo_months', 'INTEGER'],
+  ['term_months', 'INTEGER'],
+  ['promo_ended', 'INTEGER NOT NULL DEFAULT 0'],
+] as const) {
+  if (!subscriptionColumns.some((c) => c.name === name)) db.exec(`ALTER TABLE subscriptions ADD COLUMN ${name} ${type}`)
+}
+
 // Cada cobro automatico pertenece a una suscripcion; `rejected` marca el intento que el banco rechazo (sigue pendiente).
 const paymentColumns = db.pragma('table_info(payments)') as { name: string }[]
 if (!paymentColumns.some((c) => c.name === 'subscription_id')) {

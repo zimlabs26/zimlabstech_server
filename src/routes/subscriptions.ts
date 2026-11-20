@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import type { SessionUser } from '../auth/sessions.js'
-import { liveSubscription, toDebit, type SubscriptionRow } from '../billing.js'
+import { discounted, liveSubscription, toDebit, type SubscriptionRow } from '../billing.js'
 import { db } from '../db.js'
 import { captureError } from '../errorlog.js'
 import { cancelPreapproval, createPreapproval, MpError, mpEnabled } from '../mercadopago.js'
@@ -29,11 +29,21 @@ interface ClientRow {
 /* ---------- Activar: crea la suscripcion y devuelve el link para el cliente ---------- */
 
 subscriptionsRouter.post('/', sameOrigin, limiter, async (req, res) => {
-  const body = z.object({ clientId }).safeParse(req.body)
+  // Promocion opcional: `percent`% de descuento los primeros `promoMonths` cobros, valor normal despues y baja a los `termMonths`.
+  const promoSchema = z
+    .object({
+      percent: z.number().int().min(1).max(90),
+      promoMonths: z.number().int().min(1).max(120),
+      termMonths: z.number().int().min(2).max(120),
+    })
+    .refine((p) => p.promoMonths < p.termMonths)
+  const body = z.object({ clientId, promo: promoSchema.optional() }).safeParse(req.body)
   if (!body.success) {
-    res.status(400).json({ error: 'invalid_input' })
+    const field = body.error.issues[0]?.path[0] === 'promo' ? 'promo' : undefined
+    res.status(400).json({ error: 'invalid_input', ...(field ? { field } : {}) })
     return
   }
+  const promo = body.data.promo
   if (!mpEnabled()) {
     res.status(503).json({ error: 'mp_disabled' })
     return
@@ -71,19 +81,31 @@ subscriptionsRouter.post('/', sameOrigin, limiter, async (req, res) => {
     return
   }
 
+  // Con promocion se cobra el importe con descuento y el valor normal queda guardado para cuando termine.
+  const fullCents = client.maintenance_price
+  const firstCents = promo ? discounted(fullCents, promo.percent) : fullCents
+  if (firstCents <= 0) {
+    res.status(400).json({ error: 'invalid_input', field: 'promo' })
+    return
+  }
+
   try {
     const pre = await createPreapproval({
       reason: `Mantenimiento mensual - ${client.name}`.slice(0, 200),
       externalReference: `client-${client.id}`,
       payerEmail: client.email,
-      amount: client.maintenance_price / 100,
+      amount: firstCents / 100,
     })
     if (!pre.init_point) throw new Error('Mercado Pago no devolvio el link de activacion')
 
     const user = res.locals.user as SessionUser
     db.prepare(
-      `INSERT INTO subscriptions (client_id, mp_id, status, amount, init_point, created_by) VALUES (?, ?, 'pending', ?, ?, ?)`,
-    ).run(client.id, pre.id, client.maintenance_price, pre.init_point, user.id)
+      `INSERT INTO subscriptions (client_id, mp_id, status, amount, init_point, created_by, full_amount, promo_percent, promo_months, term_months)
+       VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      client.id, pre.id, firstCents, pre.init_point, user.id,
+      promo ? fullCents : null, promo?.percent ?? null, promo?.promoMonths ?? null, promo?.termMonths ?? null,
+    )
 
     emit('clients', { exceptCid: res.locals.cid })
     const row = liveSubscription(client.id) as SubscriptionRow

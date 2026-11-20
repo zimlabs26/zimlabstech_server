@@ -301,8 +301,9 @@ function saveServices(clientId: number, services: NonNullable<z.infer<typeof cli
   )
   for (const s of services) {
     // Solo los mantenimientos (que se cobran todos los meses) llevan descuento; un proyecto se vende a su precio de lista.
-    const percent = s.product.startsWith('maint_') ? s.discountPercent : 0
-    insert.run(clientId, s.product, s.status, s.price, s.currency, percent, percent ? s.discountMonths : null)
+    // Todos los servicios pueden llevar descuento; los meses solo tienen sentido en los mantenimientos (se cobran todos los meses).
+    const percent = s.discountPercent
+    insert.run(clientId, s.product, s.status, s.price, s.currency, percent, percent && s.product.startsWith('maint_') ? s.discountMonths : null)
   }
 }
 

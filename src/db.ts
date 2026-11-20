@@ -337,7 +337,6 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_client_services_client ON client_services(client_id);
 `)
 // Un descuento solo tiene sentido en un mantenimiento: si algun proyecto lo traia, vuelve a su precio de lista.
-db.exec(`UPDATE client_services SET discount_percent = 0, discount_months = NULL WHERE product NOT LIKE 'maint\\_%' ESCAPE '\\' AND discount_percent > 0`)
 if (!hadClientServices) {
   // Lo que ya estaba cargado: el plan de mantenimiento de cada cliente pasa a ser un servicio de mantenimiento
   // (cliente si ya lo era, posible cliente si no). Si no tenia precio cotizado se usa el de la lista por defecto.

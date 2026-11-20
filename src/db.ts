@@ -343,6 +343,10 @@ db.exec(`
     created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
   );
 `)
+// Logo de la empresa (ya reducido por la web): imagen PNG, JPEG o WebP como data URL. Nunca SVG.
+if (!(db.pragma('table_info(audits)') as { name: string }[]).some((c) => c.name === 'logo')) {
+  db.exec('ALTER TABLE audits ADD COLUMN logo TEXT')
+}
 
 // Cada cobro automatico pertenece a una suscripcion; `rejected` marca el intento que el banco rechazo (sigue pendiente).
 const paymentColumns = db.pragma('table_info(payments)') as { name: string }[]

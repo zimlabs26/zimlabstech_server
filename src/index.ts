@@ -72,6 +72,8 @@ const smallJson = express.json({ limit: '10kb' })
 const importJson = express.json({ limit: '1mb' })
 app.use((req, res, next) => {
   if (req.path === '/api/auth/avatar') return next()
+  // Auditoria: alta y edicion pueden llevar el logo (ya reducido); esas rutas tienen su propio limite en routes/audits.ts.
+  if ((req.method === 'POST' || req.method === 'PUT') && /^\/api\/audits(\/\d+)?$/.test(req.path)) return next()
   return (req.path === '/api/clients/import' ? importJson : smallJson)(req, res, next)
 })
 app.use(cookieParser())

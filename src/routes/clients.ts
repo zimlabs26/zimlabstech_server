@@ -566,6 +566,5 @@ clientsRouter.delete('/:id', sameOrigin, rateLimit({ windowMs: 15 * 60 * 1000, m
   emit('clients', { exceptCid: res.locals.cid })
   emit('payments', { adminsOnly: true, exceptCid: res.locals.cid })
   emit('tasks', { adminsOnly: true, exceptCid: res.locals.cid })
-  emit('forms', { exceptCid: res.locals.cid })
   res.status(204).end()
 })

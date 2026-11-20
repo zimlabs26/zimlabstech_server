@@ -9,7 +9,6 @@ import type { Role } from './db.js'
 
 export type RealtimeType =
   | 'clients' // cambio la lista de clientes
-  | 'forms' // cambio la lista de formularios de relevamiento
   | 'tasks' // cambio el tablero de tareas (solo administradores)
   | 'payments' // cambio la lista de pagos (solo administradores)
   | 'admins' // cambio la lista de administradores (solo administradores)

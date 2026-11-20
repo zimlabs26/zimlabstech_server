@@ -7,7 +7,8 @@ import helmet from 'helmet'
 import { purgeExpiredSessions, sessionIdOf, type SessionUser } from './auth/sessions.js'
 import { bootstrapSuperAdmin } from './bootstrap.js'
 import { config } from './config.js'
-import './db.js'
+import { db } from './db.js'
+import { rateLimit } from './middleware/rateLimit.js'
 import { captureError } from './errorlog.js'
 import { requireUser } from './middleware/guards.js'
 import { openConnection } from './realtime.js'
@@ -18,12 +19,11 @@ import { quotesRouter } from './routes/quotes.js'
 import { clientsRouter } from './routes/clients.js'
 import { dashboardRouter } from './routes/dashboard.js'
 import { errorsRouter } from './routes/errors.js'
-import { briefRouter, formsRouter } from './routes/forms.js'
 import { exportRouter } from './routes/export.js'
 import { expensesRouter } from './routes/expenses.js'
 import { pricingRouter, promotionsRouter } from './routes/promotions.js'
 import { reconcile } from './billing.js'
-import { auditsRouter, checkAllAudits } from './routes/audits.js'
+import { auditsRouter, tickAuditSchedule } from './routes/audits.js'
 import { paymentsRouter } from './routes/payments.js'
 import { subscriptionsRouter } from './routes/subscriptions.js'
 import { tasksRouter } from './routes/tasks.js'
@@ -85,8 +85,30 @@ app.use((req, res, next) => {
   next()
 })
 
-app.get('/api/health', (_req, res) => {
-  res.json({ ok: true })
+/**
+ * Salud del servidor: la usa la auditoria (y cualquier monitor). No alcanza con que el servidor conteste: tambien se
+ * comprueba la base de datos, leyendola y ESCRIBIENDO en ella (una escritura sin cambios detecta una base bloqueada,
+ * de solo lectura o con el disco lleno). Es publica, asi que solo informa si esta bien y cuanto tardo, nada mas, y la
+ * escritura se hace como mucho una vez cada 10 segundos aunque la consulten mas seguido.
+ */
+let dbHealth: { at: number; ok: boolean; ms: number } | null = null
+function checkDatabase(): { ok: boolean; ms: number } {
+  const now = Date.now()
+  if (dbHealth && now - dbHealth.at < 10_000) return dbHealth
+  let ok = false
+  try {
+    db.prepare('SELECT COUNT(*) AS n FROM sqlite_master').get() // lectura
+    db.prepare('UPDATE audit_settings SET id = id WHERE id = 1').run() // escritura (no cambia ningun dato)
+    ok = true
+  } catch {
+    ok = false
+  }
+  dbHealth = { at: now, ok, ms: Date.now() - now }
+  return dbHealth
+}
+app.get('/api/health', rateLimit({ windowMs: 60_000, max: 60 }), (_req, res) => {
+  const { ok, ms } = checkDatabase()
+  res.status(ok ? 200 : 503).json({ ok, db: { ok, ms } })
 })
 
 // Tiempo real: la conexion queda abierta y el servidor avisa cuando algo cambia (ver realtime.ts).
@@ -104,9 +126,6 @@ app.use('/api/auth', authRouter)
 app.use('/api/auth', passkeysRouter)
 app.use('/api/admin', adminRouter)
 app.use('/api/clients', clientsRouter)
-app.use('/api/forms', formsRouter)
-// Publico: el cliente completa su formulario con un enlace (token de 144 bits; ver routes/forms.ts).
-app.use('/api/brief', briefRouter)
 // Publico: pedido de cotizacion desde la web (crea un posible cliente; limitado por IP).
 app.use('/api/quotes', quotesRouter)
 app.use('/api/dashboard', dashboardRouter)
@@ -168,9 +187,9 @@ setInterval(purgeExpiredSessions, 60 * 60 * 1000).unref()
 // Debito automatico: conciliacion de respaldo con Mercado Pago (por si se perdio algun aviso): al arrancar y cada hora.
 setTimeout(() => void reconcile(), 30_000).unref()
 setInterval(() => void reconcile(), 60 * 60 * 1000).unref()
-// Auditoria: se verifican las paginas y CRM cargados al arrancar y despues cada 10 minutos.
-setTimeout(() => void checkAllAudits(), 45_000).unref()
-setInterval(() => void checkAllAudits(), 10 * 60 * 1000).unref()
+// Auditoria: la corrida de todo es a pedido o programada (cada dia, 7 dias, 15 dias o 1 mes); cada 15 minutos se mira si toca.
+setTimeout(() => void tickAuditSchedule(), 60_000).unref()
+setInterval(() => void tickAuditSchedule(), 15 * 60 * 1000).unref()
 
 app.listen(config.port, () => {
   console.log(`Server escuchando en http://localhost:${config.port}`)

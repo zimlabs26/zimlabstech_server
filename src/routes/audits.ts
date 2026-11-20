@@ -9,9 +9,13 @@ import { rateLimit } from '../middleware/rateLimit.js'
 import { emit } from '../realtime.js'
 
 /**
- * Auditoria: listado de paginas y CRM que arma el equipo, con un semaforo (verde / amarillo / rojo) que el servidor
- * actualiza solo (ver `checkAllAudits`) o a pedido. Cada entrada puede tener los dos servicios: la URL de la pagina y/o la
- * direccion del servidor del CRM; cada uno se verifica por separado y el estado general es el peor de los dos.
+ * Auditoria: listado de empresas con lo que se les armo, y un semaforo (verde / amarillo / rojo) que el servidor actualiza
+ * a pedido o de forma programada. Cada entrada puede tener tres servicios:
+ *  - pagina: la URL de la pagina web.
+ *  - CRM y tienda: se auditan por capas; piden la URL del frontend (la web que usa la gente), la URL del servidor y la
+ *    ruta de salud de la base de datos (opcional; por defecto /api/health del servidor, que lee y escribe en la base).
+ *    NUNCA se guardan claves ni cadenas de conexion.
+ * Cada servicio se verifica por separado y el estado general es el peor de los que tiene.
  * Todos los usuarios del CRM ven la lista; solo administradores la editan.
  */
 
@@ -22,8 +26,10 @@ auditsRouter.use(express.json({ limit: '100kb' }))
 
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 120 })
 
-type Kind = 'page' | 'crm'
-const KINDS: Kind[] = ['page', 'crm']
+type Kind = 'page' | 'crm' | 'store'
+const KINDS: Kind[] = ['page', 'crm', 'store']
+type AppKind = 'crm' | 'store'
+const APP_KINDS: AppKind[] = ['crm', 'store']
 
 interface AuditRow {
   id: number
@@ -32,18 +38,30 @@ interface AuditRow {
   logo: string | null
   page_url: string | null
   crm_url: string | null
+  crm_app_url: string | null
+  crm_db_url: string | null
+  store_url: string | null
+  store_app_url: string | null
+  store_db_url: string | null
   page_result: string | null
   crm_result: string | null
+  store_result: string | null
 }
 
-const columns = 'id, name, status, logo, page_url, crm_url, page_result, crm_result'
+const columns =
+  'id, name, status, logo, page_url, crm_url, crm_app_url, crm_db_url, store_url, store_app_url, store_db_url, page_result, crm_result, store_result'
 
-/** Ultimo resultado guardado de un servicio (sin el estado `url`, que va aparte). */
+/** Ultimo resultado guardado de un servicio. */
 type StoredResult = CheckResult & { checkedAt: string }
 
-const urlOf = (r: AuditRow, kind: Kind) => (kind === 'page' ? r.page_url : r.crm_url)
+/** Direccion principal del servicio: la URL de la pagina, o la del servidor del CRM / tienda. */
+const urlOf = (r: AuditRow, kind: Kind) => (kind === 'page' ? r.page_url : kind === 'crm' ? r.crm_url : r.store_url)
+/** Frontend (la web que usa la gente) del CRM / tienda. */
+const appUrlOf = (r: AuditRow, kind: AppKind) => (kind === 'crm' ? r.crm_app_url : r.store_app_url)
+/** Ruta de salud de la base de datos del CRM / tienda (null = la del servidor). */
+const dbUrlOf = (r: AuditRow, kind: AppKind) => (kind === 'crm' ? r.crm_db_url : r.store_db_url)
 const resultOf = (r: AuditRow, kind: Kind): StoredResult | null => {
-  const raw = kind === 'page' ? r.page_result : r.crm_result
+  const raw = kind === 'page' ? r.page_result : kind === 'crm' ? r.crm_result : r.store_result
   return raw ? (JSON.parse(raw) as StoredResult) : null
 }
 
@@ -53,13 +71,20 @@ const toService = (r: AuditRow, kind: Kind) => {
   if (!url) return null
   const res = resultOf(r, kind)
   return {
+    /** Pagina: su URL. CRM y tienda: la del servidor. */
     url,
+    /** Solo CRM y tienda: el frontend y la ruta de salud de la base de datos (null = la del servidor). */
+    appUrl: kind === 'page' ? null : appUrlOf(r, kind),
+    dbUrl: kind === 'page' ? null : dbUrlOf(r, kind),
     status: res?.status ?? null,
+    /** En CRM y tienda cada alerta lleva el origen: "app:" (frontend) o "srv:" (servidor y base de datos). */
     alerts: res?.alerts ?? [],
     detail: res?.detail ?? '',
     httpStatus: res?.httpStatus ?? null,
     responseMs: res?.responseMs ?? null,
     sslExpiresOn: res?.sslExpiresOn ?? null,
+    /** Controles revisados y cuantos salieron bien (null en las verificaciones viejas, de antes de los controles). */
+    checks: res?.checks ?? null,
     checkedAt: res?.checkedAt ?? null,
   }
 }
@@ -72,16 +97,28 @@ const toAudit = (r: AuditRow) => ({
   status: r.status,
   page: toService(r, 'page'),
   crm: toService(r, 'crm'),
+  store: toService(r, 'store'),
 })
 
 const idSchema = z.coerce.number().int().positive()
 
+/** CRM o tienda: frontend, servidor y (opcional) ruta de salud de la base de datos. */
+const appServiceSchema = z
+  .object({
+    app: z.string().trim().max(300),
+    server: z.string().trim().max(300),
+    db: z.string().trim().max(300).nullish(),
+  })
+  .strict()
+  .nullable()
+
 const auditSchema = z
   .object({
     name: z.string().trim().min(1).max(120),
-    /** URL de la pagina y direccion del servidor del CRM: texto, o null / vacio si ese servicio no esta habilitado. */
+    /** URL de la pagina: texto, o null si ese servicio no esta habilitado. */
     page: z.string().trim().max(300).nullable(),
-    crm: z.string().trim().max(300).nullable(),
+    crm: appServiceSchema,
+    store: appServiceSchema,
     /** Logo reducido por la web. undefined = no cambiar, null = quitarlo. Solo PNG, JPEG o WebP (nunca SVG: podria llevar scripts). */
     logo: z
       .string()
@@ -92,21 +129,45 @@ const auditSchema = z
   })
   .strict()
 
-/** Valida el cuerpo; devuelve las direcciones normalizadas o el campo que esta mal. */
-function readBody(body: unknown):
-  | { ok: true; name: string; page: string | null; crm: string | null; logo: string | null | undefined }
-  | { ok: false; field: string } {
+interface AppInput {
+  app: string
+  server: string
+  db: string | null
+}
+
+type Body =
+  | { ok: true; name: string; page: string | null; crm: AppInput | null; store: AppInput | null; logo: string | null | undefined }
+  | { ok: false; field: string }
+
+/** Valida el cuerpo; devuelve las direcciones normalizadas o el campo que esta mal ("crmApp", "storeServer"...). */
+function readBody(body: unknown): Body {
   const parsed = auditSchema.safeParse(body)
   if (!parsed.success) return { ok: false, field: String(parsed.error.issues[0]?.path[0] ?? 'name') }
   const a = parsed.data
-  const normalize = (raw: string | null) => (raw ? (parseAuditUrl(raw)?.toString() ?? false) : null)
-  const page = normalize(a.page)
-  const crm = normalize(a.crm)
-  if (page === false) return { ok: false, field: 'page' }
-  if (crm === false) return { ok: false, field: 'crm' }
-  if (!page && !crm) return { ok: false, field: 'services' } // hace falta al menos un servicio
+  const norm = (raw: string) => parseAuditUrl(raw)?.toString() ?? null
+
+  const page = a.page ? norm(a.page) : null
+  if (a.page && !page) return { ok: false, field: 'page' }
+
+  const appInput = (kind: AppKind): AppInput | { field: string } | null => {
+    const s = a[kind]
+    if (!s) return null
+    const app = s.app ? norm(s.app) : null
+    const server = s.server ? norm(s.server) : null
+    const dbUrl = s.db ? norm(s.db) : null
+    if (!app) return { field: `${kind}App` }
+    if (!server) return { field: `${kind}Server` }
+    if (s.db && !dbUrl) return { field: `${kind}Db` }
+    return { app, server, db: dbUrl }
+  }
+  const crm = appInput('crm')
+  if (crm && 'field' in crm) return { ok: false, field: crm.field }
+  const store = appInput('store')
+  if (store && 'field' in store) return { ok: false, field: store.field }
+
+  if (!page && !crm && !store) return { ok: false, field: 'services' } // hace falta al menos un servicio
   if (a.logo && !logoIsValid(a.logo)) return { ok: false, field: 'logo' }
-  return { ok: true, name: a.name, page, crm, logo: a.logo }
+  return { ok: true, name: a.name, page, crm: crm as AppInput | null, store: store as AppInput | null, logo: a.logo }
 }
 
 /** Los bytes tienen que ser de la imagen que dice el tipo (no alcanza con el texto del data URL). */
@@ -119,20 +180,38 @@ function logoIsValid(logo: string): boolean {
 }
 
 const RANK: Record<AuditStatus, number> = { red: 3, yellow: 2, green: 1 }
+const worstOf = (list: AuditStatus[]): AuditStatus | null => list.reduce<AuditStatus | null>((w, s) => (!w || RANK[s] > RANK[w] ? s : w), null)
 
 /** Estado general de una entrada: el peor de los servicios que tiene resultado. */
 function overallStatus(r: AuditRow): AuditStatus | null {
-  let worst: AuditStatus | null = null
-  for (const kind of KINDS) {
-    if (!urlOf(r, kind)) continue
-    const s = resultOf(r, kind)?.status
-    if (s && (!worst || RANK[s] > RANK[worst])) worst = s
-  }
-  return worst
+  return worstOf(
+    KINDS.filter((kind) => urlOf(r, kind))
+      .map((kind) => resultOf(r, kind)?.status)
+      .filter((s): s is AuditStatus => !!s),
+  )
 }
 
+/** Junta el resultado del frontend y el del servidor (con su base de datos) en uno solo, marcando de donde viene cada alerta. */
+function merge(app: CheckResult | null, server: CheckResult): CheckResult {
+  const parts: { tag: string; r: CheckResult }[] = [...(app ? [{ tag: 'app', r: app }] : []), { tag: 'srv', r: server }]
+  const ssl = parts.map((p) => p.r.sslExpiresOn).filter((d): d is string => !!d).sort()[0] ?? null
+  return {
+    status: worstOf(parts.map((p) => p.r.status)) ?? 'red',
+    alerts: parts.flatMap((p) => p.r.alerts.map((alert) => `${p.tag}:${alert}`)),
+    detail: parts.map((p) => p.r.detail).join(' | '),
+    httpStatus: server.httpStatus,
+    responseMs: server.responseMs,
+    sslExpiresOn: ssl,
+    checks: { passed: parts.reduce((n, p) => n + p.r.checks.passed, 0), total: parts.reduce((n, p) => n + p.r.checks.total, 0) },
+  }
+}
+
+/** Todo lo que identifica a lo auditado de un servicio: si cambia, el resultado viejo ya no vale. */
+const signature = (r: AuditRow, kind: Kind) =>
+  kind === 'page' ? String(r.page_url) : [urlOf(r, kind), appUrlOf(r, kind), dbUrlOf(r, kind)].join('|')
+
 /**
- * Verifica los servicios de una entrada (los dos, o solo `only`) y guarda cada resultado. Nunca lanza: un fallo de la
+ * Verifica los servicios de una entrada (todos, o solo `only`) y guarda cada resultado. Nunca lanza: un fallo de la
  * verificacion es un resultado (rojo).
  */
 export async function runAudit(id: number, only: Kind[] = KINDS): Promise<void> {
@@ -141,12 +220,20 @@ export async function runAudit(id: number, only: Kind[] = KINDS): Promise<void> 
     if (!row) return
     const url = urlOf(row, kind)
     if (!url) continue
+    const before = signature(row, kind)
     try {
-      const result = await runCheck(url)
+      let result: CheckResult
+      if (kind === 'page') result = await runCheck(url, 'page')
+      else {
+        // CRM y tienda por capas: frontend (la web que usa la gente) y servidor con su base de datos.
+        const app = appUrlOf(row, kind)
+        const [appResult, serverResult] = await Promise.all([app ? runCheck(app, 'app') : null, runCheck(url, 'crm', dbUrlOf(row, kind))])
+        result = merge(appResult, serverResult)
+      }
       db.transaction(() => {
         const current = db.prepare(`SELECT ${columns} FROM audits WHERE id = ?`).get(id) as unknown as AuditRow | undefined
         // Puede haberse borrado o cambiado la direccion mientras se consultaba: en ese caso el resultado ya no vale.
-        if (!current || urlOf(current, kind) !== url) return
+        if (!current || signature(current, kind) !== before) return
         const stored: StoredResult = { ...result, checkedAt: new Date().toISOString() }
         db.prepare(`UPDATE audits SET ${kind}_result = ? WHERE id = ?`).run(JSON.stringify(stored), id)
         const updated = db.prepare(`SELECT ${columns} FROM audits WHERE id = ?`).get(id) as unknown as AuditRow
@@ -159,20 +246,111 @@ export async function runAudit(id: number, only: Kind[] = KINDS): Promise<void> 
   emit('audits')
 }
 
-/** Verifica todas las entradas, de a una (para no abrir decenas de conexiones juntas). Lo llama el reloj del servidor. */
-export async function checkAllAudits(): Promise<void> {
-  const ids = db.prepare('SELECT id FROM audits ORDER BY id').all() as { id: number }[]
-  for (const { id } of ids) await runAudit(id)
+/* ---------- Auditar todo y programacion ---------- */
+
+export const FREQUENCIES = ['manual', 'daily', 'weekly', 'biweekly', 'monthly'] as const
+type Frequency = (typeof FREQUENCIES)[number]
+
+/** Cada cuanto se audita todo solo (el mes son 30 dias). `manual` no tiene intervalo: nunca corre solo. */
+const INTERVAL_MS: Record<Exclude<Frequency, 'manual'>, number> = {
+  daily: 86_400_000,
+  weekly: 7 * 86_400_000,
+  biweekly: 15 * 86_400_000,
+  monthly: 30 * 86_400_000,
+}
+
+interface ScheduleRow {
+  frequency: Frequency
+  last_run_at: string | null
+  next_run_at: string | null
+}
+
+const readSchedule = () => db.prepare('SELECT frequency, last_run_at, next_run_at FROM audit_settings WHERE id = 1').get() as unknown as ScheduleRow
+const toSchedule = (s: ScheduleRow) => ({ frequency: s.frequency, lastRunAt: s.last_run_at, nextRunAt: s.next_run_at })
+const nextRunFrom = (frequency: Frequency, from = Date.now()) =>
+  frequency === 'manual' ? null : new Date(from + INTERVAL_MS[frequency]).toISOString()
+
+/** Mientras corre una auditoria de todo (a pedido o programada): solo una a la vez. */
+let running = false
+export const isAuditRunning = () => running
+
+/**
+ * Audita todos los servicios de todas las empresas, de a una entrada (para no abrir decenas de conexiones juntas).
+ * Devuelve false si ya habia una corriendo. Al terminar anota la fecha y deja programada la proxima (si hay programacion).
+ */
+export async function runAllAudits(): Promise<boolean> {
+  if (running) return false
+  running = true
+  emit('audits') // las pantallas abiertas pasan a "auditando..."
+  try {
+    const ids = db.prepare('SELECT id FROM audits ORDER BY id').all() as { id: number }[]
+    for (const { id } of ids) await runAudit(id)
+  } finally {
+    running = false
+    const s = readSchedule()
+    const now = Date.now()
+    db.prepare('UPDATE audit_settings SET last_run_at = ?, next_run_at = ? WHERE id = 1').run(new Date(now).toISOString(), nextRunFrom(s.frequency, now))
+    emit('audits')
+  }
+  return true
+}
+
+/** Lo llama el reloj del servidor cada tanto: si ya toca la corrida programada, audita todo. */
+export async function tickAuditSchedule(): Promise<void> {
+  try {
+    const s = readSchedule()
+    if (s.frequency === 'manual') return
+    if (!s.next_run_at) {
+      db.prepare('UPDATE audit_settings SET next_run_at = ? WHERE id = 1').run(nextRunFrom(s.frequency))
+      return
+    }
+    if (Date.parse(s.next_run_at) <= Date.now()) await runAllAudits()
+  } catch (error) {
+    captureError(error, { kind: 'server', message: 'No se pudo correr la auditoria programada', alert: false })
+  }
 }
 
 /* ---------- Listar (todos) ---------- */
 
 auditsRouter.get('/', (_req, res) => {
   const rows = db.prepare(`SELECT ${columns} FROM audits ORDER BY name COLLATE NOCASE`).all() as unknown as AuditRow[]
-  res.json({ audits: rows.map(toAudit) })
+  res.json({ audits: rows.map(toAudit), schedule: toSchedule(readSchedule()), running })
+})
+
+/** Cambiar la programacion (administradores). La proxima corrida se cuenta desde ahora. */
+auditsRouter.put('/schedule', requireAdmin, sameOrigin, limiter, (req, res) => {
+  const body = z.object({ frequency: z.enum(FREQUENCIES) }).strict().safeParse(req.body)
+  if (!body.success) {
+    res.status(400).json({ error: 'invalid_input' })
+    return
+  }
+  db.prepare('UPDATE audit_settings SET frequency = ?, next_run_at = ? WHERE id = 1').run(body.data.frequency, nextRunFrom(body.data.frequency))
+  emit('audits', { exceptCid: res.locals.cid })
+  res.json({ schedule: toSchedule(readSchedule()) })
+})
+
+/** Auditar todo ahora: responde enseguida y el avance llega por tiempo real. */
+auditsRouter.post('/run-all', requireAdmin, sameOrigin, rateLimit({ windowMs: 15 * 60 * 1000, max: 20 }), (_req, res) => {
+  if (running) {
+    res.status(409).json({ error: 'already_running' })
+    return
+  }
+  res.status(202).json({ running: true })
+  void runAllAudits()
 })
 
 /* ---------- Crear / editar / borrar / verificar (administradores) ---------- */
+
+/** Valores de las columnas de direcciones segun lo que llego (el mismo orden que `ADDRESS_COLUMNS`). */
+function addressValues(b: Extract<Body, { ok: true }>): (string | null)[] {
+  return [
+    (b.page ?? b.crm?.server ?? b.store?.server)!, // `url`, obligatoria desde antes: la primera direccion que haya
+    b.page ? 1 : 0, b.crm ? 1 : 0 /* is_page, is_crm */,
+    b.page, b.crm?.server ?? null, b.crm?.app ?? null, b.crm?.db ?? null,
+    b.store?.server ?? null, b.store?.app ?? null, b.store?.db ?? null,
+  ] as (string | null)[]
+}
+const ADDRESS_COLUMNS = ['url', 'is_page', 'is_crm', 'page_url', 'crm_url', 'crm_app_url', 'crm_db_url', 'store_url', 'store_app_url', 'store_db_url']
 
 auditsRouter.post('/', requireAdmin, sameOrigin, limiter, (req, res) => {
   const body = readBody(req.body)
@@ -181,11 +359,11 @@ auditsRouter.post('/', requireAdmin, sameOrigin, limiter, (req, res) => {
     return
   }
   const user = res.locals.user as SessionUser
+  const cols = ['name', ...ADDRESS_COLUMNS, 'logo', 'created_by']
   const id = Number(
     db
-      .prepare('INSERT INTO audits (name, url, is_page, is_crm, page_url, crm_url, logo, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(body.name, (body.page ?? body.crm)!, body.page ? 1 : 0, body.crm ? 1 : 0, body.page, body.crm, body.logo ?? null, user.id)
-      .lastInsertRowid,
+      .prepare(`INSERT INTO audits (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+      .run(body.name, ...addressValues(body), body.logo ?? null, user.id).lastInsertRowid,
   )
   const row = db.prepare(`SELECT ${columns} FROM audits WHERE id = ?`).get(id) as unknown as AuditRow
   emit('audits', { exceptCid: res.locals.cid })
@@ -210,11 +388,18 @@ auditsRouter.put('/:id', requireAdmin, sameOrigin, limiter, (req, res) => {
     return
   }
   // Un servicio con direccion nueva (o recien habilitado) pierde su resultado y se verifica de nuevo; si se deshabilita, se borra.
-  const changed = KINDS.filter((kind) => urlOf(before, kind) !== (kind === 'page' ? body.page : body.crm))
+  const nextSignature: Record<Kind, string> = {
+    page: String(body.page),
+    crm: body.crm ? [body.crm.server, body.crm.app, body.crm.db].join('|') : 'null||',
+    store: body.store ? [body.store.server, body.store.app, body.store.db].join('|') : 'null||',
+  }
+  const same = (kind: Kind) => {
+    const was = signature(before, kind)
+    return was === nextSignature[kind] || (!urlOf(before, kind) && nextSignature[kind].startsWith('null'))
+  }
+  const changed = KINDS.filter((kind) => !same(kind))
   db.transaction(() => {
-    db.prepare(
-      'UPDATE audits SET name = ?, url = ?, is_page = ?, is_crm = ?, page_url = ?, crm_url = ? WHERE id = ?',
-    ).run(body.name, (body.page ?? body.crm)!, body.page ? 1 : 0, body.crm ? 1 : 0, body.page, body.crm, id.data)
+    db.prepare(`UPDATE audits SET name = ?, ${ADDRESS_COLUMNS.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`).run(body.name, ...addressValues(body), id.data)
     for (const kind of changed) db.prepare(`UPDATE audits SET ${kind}_result = NULL WHERE id = ?`).run(id.data)
     // Logo: sin el campo no se toca; con null se quita; con una imagen se reemplaza.
     if (body.logo !== undefined) db.prepare('UPDATE audits SET logo = ? WHERE id = ?').run(body.logo, id.data)
@@ -224,7 +409,8 @@ auditsRouter.put('/:id', requireAdmin, sameOrigin, limiter, (req, res) => {
   const row = db.prepare(`SELECT ${columns} FROM audits WHERE id = ?`).get(id.data) as unknown as AuditRow
   emit('audits', { exceptCid: res.locals.cid })
   res.json({ audit: toAudit(row) })
-  if (changed.length) void runAudit(id.data, changed)
+  const toRun = changed.filter((kind) => urlOf(row, kind))
+  if (toRun.length) void runAudit(id.data, toRun)
 })
 
 auditsRouter.delete('/:id', requireAdmin, sameOrigin, limiter, (req, res) => {

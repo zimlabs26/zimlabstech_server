@@ -417,6 +417,26 @@ db.exec(`
 if (!(db.pragma('table_info(audits)') as { name: string }[]).some((c) => c.name === 'logo')) {
   db.exec('ALTER TABLE audits ADD COLUMN logo TEXT')
 }
+// CRM y tienda se auditan por capas: el frontend (`*_app_url`), el servidor (`crm_url` / `store_url`) y la base de datos
+// (`*_db_url`: la ruta de salud que informa si la base lee y escribe; NUNCA se guardan claves ni cadenas de conexion).
+{
+  const have = new Set((db.pragma('table_info(audits)') as { name: string }[]).map((c) => c.name))
+  for (const col of ['crm_app_url', 'crm_db_url', 'store_url', 'store_app_url', 'store_db_url', 'store_result']) {
+    if (!have.has(col)) db.exec(`ALTER TABLE audits ADD COLUMN ${col} TEXT`)
+  }
+}
+
+// Programacion de la auditoria (una sola fila): cada cuanto se audita todo solo. `manual` = nunca, solo a pedido.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS audit_settings (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    frequency   TEXT NOT NULL DEFAULT 'daily' CHECK (frequency IN ('manual', 'daily', 'weekly', 'biweekly', 'monthly')),
+    last_run_at TEXT,
+    next_run_at TEXT
+  );
+  INSERT OR IGNORE INTO audit_settings (id) VALUES (1);
+`)
+
 // Una entrada puede tener los dos servicios: la URL de la pagina y/o la direccion del servidor del CRM. Cada uno guarda su
 // ultimo resultado (JSON con estado, alertas, detalle, tiempos y certificado); `status` queda como el peor de los dos.
 // `url` (obligatoria desde antes) guarda la primera direccion, solo para compatibilidad.

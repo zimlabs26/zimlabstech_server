@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { z } from 'zod'
 import type { SessionUser } from '../auth/sessions.js'
 import { discounted, liveSubscription, toDebit } from '../billing.js'
-import { clientSearchText, db, normalizeText } from '../db.js'
+import { clientCode, clientSearchText, db, fillClientCodes, normalizeText } from '../db.js'
 import { captureError } from '../errorlog.js'
 import { mpEnabled, updatePreapprovalAmount } from '../mercadopago.js'
 import { requireUser, sameOrigin } from '../middleware/guards.js'
@@ -36,15 +36,74 @@ interface ClientRow {
   maintenance_price: number | null
   maintenance_currency: 'ARS' | 'USD'
   prospect: 0 | 1
+  country: string | null
+  tax_id: string | null
+  code: string | null
   created_at: string
 }
 
 const columns =
-  'id, name, email, phone, company, notes, category, maintenance_plan, maintenance_price, maintenance_currency, prospect, created_at'
+  'id, name, email, phone, company, notes, category, maintenance_plan, maintenance_price, maintenance_currency, prospect, country, tax_id, code, created_at'
 
-const toClient = (r: ClientRow) => {
+/** Paises que se pueden elegir: Latinoamerica y Estados Unidos (codigo ISO de 2 letras). */
+const countries = ['AR', 'BO', 'BR', 'CL', 'CO', 'CR', 'CU', 'DO', 'EC', 'SV', 'GT', 'HT', 'HN', 'MX', 'NI', 'PA', 'PY', 'PE', 'PR', 'UY', 'VE', 'US'] as const
+
+/** Lo que se le vende a un cliente: los proyectos y los mantenimientos de la tabla de precios. */
+const serviceProducts = ['landing', 'page', 'crmb', 'crmf', 'store', 'app', 'maint_page', 'maint_store', 'maint_crmb', 'maint_crm'] as const
+type ServiceProduct = (typeof serviceProducts)[number]
+/** Estado de cada servicio: posible cliente, propuesta enviada, cliente o rechazado. */
+const serviceStatuses = ['prospect', 'proposal', 'client', 'rejected'] as const
+
+/** Mantenimiento contratado -> plan del cliente (de ahi salen su categoria y el precio del debito automatico). */
+const planOfService: Partial<Record<ServiceProduct, Plan>> = { maint_page: 'static', maint_store: 'server', maint_crmb: 'crmb', maint_crm: 'crmf' }
+const planRank: Record<Plan, number> = { static: 1, server: 2, crmb: 3, crmf: 4 }
+
+interface ServiceRow {
+  client_id: number
+  product: ServiceProduct
+  status: (typeof serviceStatuses)[number]
+  price: number
+  currency: 'ARS' | 'USD'
+  discount_percent: number
+  discount_months: number | null
+}
+
+const toService = (s: ServiceRow) => ({
+  product: s.product,
+  status: s.status,
+  /** Precio de lista (centavos). */
+  price: s.price,
+  currency: s.currency,
+  discountPercent: s.discount_percent,
+  /** Meses que dura el descuento (null = todo el periodo). */
+  discountMonths: s.discount_months,
+  /** Precio con el descuento aplicado, en centavos. */
+  finalPrice: s.discount_percent ? discounted(s.price, s.discount_percent) : s.price,
+})
+
+/** Servicios de varios clientes en una sola consulta. */
+function servicesByClient(ids: number[]): Map<number, ReturnType<typeof toService>[]> {
+  const out = new Map<number, ReturnType<typeof toService>[]>()
+  if (!ids.length) return out
+  const rows = db
+    .prepare(
+      `SELECT client_id, product, status, price, currency, discount_percent, discount_months FROM client_services
+       WHERE client_id IN (${ids.map(() => '?').join(',')}) ORDER BY id`,
+    )
+    .all(...ids) as unknown as ServiceRow[]
+  for (const r of rows) out.set(r.client_id, [...(out.get(r.client_id) ?? []), toService(r)])
+  return out
+}
+
+const toClient = (r: ClientRow, services = servicesByClient([r.id]).get(r.id) ?? []) => {
   const sub = liveSubscription(r.id)
   return {
+  /** Codigo de cliente: 3 letras de la empresa y el numero (PAN0007). */
+  code: r.code,
+  country: r.country,
+  /** CUIL/CUIT (solo Argentina), como XX-XXXXXXXX-X. */
+  taxId: r.tax_id,
+  services,
   /** Debito automatico vigente (null = no tiene). `link` solo mientras espera que el cliente ingrese su tarjeta. */
   debit: sub ? toDebit(sub) : null,
   id: r.id,
@@ -135,8 +194,9 @@ clientsRouter.get('/', (req, res) => {
   const hasMore = rows.length > limit
   const page = hasMore ? rows.slice(0, limit) : rows
 
+  const servicesOf = servicesByClient(page.map((r) => r.id))
   res.json({
-    clients: page.map(toClient),
+    clients: page.map((r) => toClient(r, servicesOf.get(r.id) ?? [])),
     nextCursor: hasMore ? page[page.length - 1].id : null,
     total,
     counts,
@@ -174,7 +234,75 @@ const clientSchema = z.object({
   currency: z.enum(['ARS', 'USD']).default('ARS'),
   /** Posible cliente (todavia no es cliente). El equipo lo marca o lo desmarca (por ejemplo al convertirlo en cliente). */
   prospect: z.boolean().default(false),
+  country: z.enum(countries).nullish().transform((v) => v ?? null),
+  /** CUIL/CUIT: opcional y solo para Argentina (con otro pais se ignora). */
+  taxId: z.string().trim().max(20).nullish().transform((v) => v || null),
+  /**
+   * Servicios del cliente con su estado, precio y descuento. Si llegan, de ahi se calculan el plan de mantenimiento, su
+   * precio y si es un posible cliente (ver `derive`); si no llegan (importacion de CSV), valen los campos de arriba.
+   */
+  services: z
+    .array(
+      z.object({
+        product: z.enum(serviceProducts),
+        status: z.enum(serviceStatuses),
+        /** Precio de lista, en centavos (el que figura en la tabla de precios). */
+        price: z.number().int().min(0).max(100_000_000_00),
+        currency: z.enum(['ARS', 'USD']).default('ARS'),
+        discountPercent: z.number().int().min(0).max(90).default(0),
+        /** Meses que dura el descuento; vacio = todo el periodo. */
+        discountMonths: z.number().int().min(1).max(120).nullish().transform((v) => v ?? null),
+      }),
+    )
+    .max(10)
+    .optional(),
+}).superRefine((c, ctx) => {
+  if (c.services && new Set(c.services.map((s) => s.product)).size !== c.services.length) {
+    ctx.addIssue({ code: 'custom', path: ['services'], message: 'duplicated_service' })
+  }
+  if (c.country === 'AR' && c.taxId && !normalizeCuil(c.taxId)) {
+    ctx.addIssue({ code: 'custom', path: ['taxId'], message: 'invalid_cuil' })
+  }
 })
+
+/** CUIL/CUIT con 11 digitos y un prefijo valido; devuelve XX-XXXXXXXX-X, o null si no lo es. */
+function normalizeCuil(raw: string): string | null {
+  const d = raw.replace(/\D/g, '')
+  if (d.length !== 11 || !['20', '23', '24', '25', '26', '27', '30', '33', '34'].includes(d.slice(0, 2))) return null
+  return `${d.slice(0, 2)}-${d.slice(2, 10)}-${d.slice(10)}`
+}
+
+/**
+ * Lo que de los servicios sale para la ficha del cliente: el plan de mantenimiento contratado (el mas alto si hay mas de
+ * uno), su precio de lista y si el cliente sigue siendo un posible cliente (ninguno de sus servicios esta en "cliente").
+ * Sin servicios (importacion de CSV) valen los campos viejos tal cual llegan.
+ */
+function derive(c: z.infer<typeof clientSchema>): { plan: Plan | null; price: number | null; currency: 'ARS' | 'USD'; prospect: boolean } {
+  if (!c.services) return { plan: c.plan, price: c.plan ? c.price : null, currency: c.currency, prospect: c.prospect }
+  let plan: Plan | null = null
+  let price: number | null = null
+  let currency: 'ARS' | 'USD' = 'ARS'
+  for (const s of c.services) {
+    const p = s.status === 'client' ? planOfService[s.product] : undefined
+    if (p && (!plan || planRank[p] > planRank[plan])) {
+      plan = p
+      price = s.price
+      currency = s.currency
+    }
+  }
+  return { plan, price, currency, prospect: !c.services.some((s) => s.status === 'client') }
+}
+
+/** Reemplaza los servicios del cliente por los que llegan. Va dentro de la transaccion que guarda al cliente. */
+function saveServices(clientId: number, services: NonNullable<z.infer<typeof clientSchema>['services']>): void {
+  db.prepare('DELETE FROM client_services WHERE client_id = ?').run(clientId)
+  const insert = db.prepare(
+    'INSERT INTO client_services (client_id, product, status, price, currency, discount_percent, discount_months) VALUES (?, ?, ?, ?, ?, ?, ?)',
+  )
+  for (const s of services) {
+    insert.run(clientId, s.product, s.status, s.price, s.currency, s.discountPercent, s.discountPercent ? s.discountMonths : null)
+  }
+}
 
 clientsRouter.post('/', sameOrigin, rateLimit({ windowMs: 15 * 60 * 1000, max: 120 }), (req, res) => {
   const parsed = clientSchema.safeParse(req.body)
@@ -186,18 +314,26 @@ clientsRouter.post('/', sameOrigin, rateLimit({ windowMs: 15 * 60 * 1000, max: 1
 
   const user = res.locals.user as SessionUser
   const c = parsed.data
-  const result = db
-    .prepare(
-      'INSERT INTO clients (name, email, phone, company, notes, maintenance_plan, maintenance_price, maintenance_currency, category, search_text, created_by, prospect) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    )
-    .run(
-      c.name, c.email, c.phone, c.company, c.notes, c.plan, c.plan ? c.price : null, c.currency,
-      categoryFor(c.plan), clientSearchText(c), user.id, c.prospect ? 1 : 0,
-    )
+  const d = derive(c)
+  const taxId = c.country === 'AR' && c.taxId ? normalizeCuil(c.taxId) : null
+  const newId = db.transaction(() => {
+    const result = db
+      .prepare(
+        'INSERT INTO clients (name, email, phone, company, notes, maintenance_plan, maintenance_price, maintenance_currency, category, search_text, created_by, prospect, country, tax_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      )
+      .run(
+        c.name, c.email, c.phone, c.company, c.notes, d.plan, d.price, d.currency,
+        categoryFor(d.plan), clientSearchText(c), user.id, d.prospect ? 1 : 0, c.country, taxId,
+      )
+    const clientId = Number(result.lastInsertRowid)
+    // El codigo lleva el numero de cliente, que recien se conoce al insertar; tambien se puede buscar por el.
+    const code = clientCode(c.company || c.name, clientId)
+    db.prepare('UPDATE clients SET code = ?, search_text = search_text || ? WHERE id = ?').run(code, ` ${code.toLowerCase()}`, clientId)
+    if (c.services) saveServices(clientId, c.services)
+    return clientId
+  })()
 
-  const row = db
-    .prepare(`SELECT ${columns} FROM clients WHERE id = ?`)
-    .get(Number(result.lastInsertRowid)) as ClientRow
+  const row = db.prepare(`SELECT ${columns} FROM clients WHERE id = ?`).get(newId) as ClientRow
 
   emit('clients', { exceptCid: res.locals.cid })
   res.status(201).json({ client: toClient(row) })
@@ -219,7 +355,11 @@ clientsRouter.put('/:id', sameOrigin, rateLimit({ windowMs: 15 * 60 * 1000, max:
   }
 
   const c = parsed.data
-  const newPrice = c.plan ? c.price : null
+  const d = derive(c)
+  const newPrice = d.plan ? d.price : null
+  const taxId = c.country === 'AR' && c.taxId ? normalizeCuil(c.taxId) : null
+  // El codigo no cambia al editar; se conserva en el texto de busqueda.
+  const currentCode = (db.prepare('SELECT code FROM clients WHERE id = ?').get(id.data) as { code: string | null } | undefined)?.code ?? null
 
   /* Con debito automatico vigente, el precio del mantenimiento es el monto que Mercado Pago cobra cada mes.
      Si cambia (por ejemplo un aumento), se actualiza PRIMERO en Mercado Pago: si eso falla no se toca nada aca,
@@ -230,7 +370,7 @@ clientsRouter.put('/:id', sameOrigin, rateLimit({ windowMs: 15 * 60 * 1000, max:
   let debitAmountChanged = false
   if (sub) {
     // El debito cobra un importe fijo en pesos: no se puede quitar el precio ni pasarlo a dolares mientras exista.
-    if (!newPrice || newPrice <= 0 || c.currency !== 'ARS') {
+    if (!newPrice || newPrice <= 0 || d.currency !== 'ARS') {
       res.status(409).json({ error: 'debit_price_locked' })
       return
     }
@@ -255,12 +395,13 @@ clientsRouter.put('/:id', sameOrigin, rateLimit({ windowMs: 15 * 60 * 1000, max:
   const result = db.transaction(() => {
     const updated = db
       .prepare(
-        'UPDATE clients SET name = ?, email = ?, phone = ?, company = ?, notes = ?, maintenance_plan = ?, maintenance_price = ?, maintenance_currency = ?, category = ?, search_text = ?, prospect = ? WHERE id = ?',
+        'UPDATE clients SET name = ?, email = ?, phone = ?, company = ?, notes = ?, maintenance_plan = ?, maintenance_price = ?, maintenance_currency = ?, category = ?, search_text = ?, prospect = ?, country = ?, tax_id = ? WHERE id = ?',
       )
       .run(
-        c.name, c.email, c.phone, c.company, c.notes, c.plan, newPrice, c.currency,
-        categoryFor(c.plan), clientSearchText(c), c.prospect ? 1 : 0, id.data,
+        c.name, c.email, c.phone, c.company, c.notes, d.plan, newPrice, d.currency,
+        categoryFor(d.plan), clientSearchText({ ...c, code: currentCode }), d.prospect ? 1 : 0, c.country, taxId, id.data,
       )
+    if (updated.changes > 0 && c.services) saveServices(id.data, c.services)
     if (debitAmountChanged && sub && newPrice) {
       const charge = chargeNow(newPrice)
       db.prepare('UPDATE subscriptions SET amount = ?, full_amount = CASE WHEN full_amount IS NULL THEN NULL ELSE ? END WHERE id = ?').run(
@@ -380,6 +521,7 @@ clientsRouter.post('/import', sameOrigin, rateLimit({ windowMs: 15 * 60 * 1000, 
         insert.run(c.name, c.email, c.phone, c.company, c.notes, c.plan, c.plan ? c.price : null, c.currency, categoryFor(c.plan), clientSearchText(c), user.id)
       }
     })()
+    fillClientCodes() // los importados tambien reciben su codigo
     // Sin exceptCid: la pestana que importo tampoco sabe que cambio la lista, asi que tambien se entera.
     emit('clients')
   }

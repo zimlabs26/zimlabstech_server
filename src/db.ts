@@ -227,9 +227,11 @@ export function clientSearchText(c: {
   email?: string | null
   phone?: string | null
   notes?: string | null
+  /** Codigo de cliente (ABC0001): tambien se busca por el. */
+  code?: string | null
 }): string {
   return normalizeText(
-    [c.name, c.company, c.email, c.phone, c.phone?.replace(/\D/g, ''), c.notes].filter(Boolean).join(' '),
+    [c.name, c.company, c.email, c.phone, c.phone?.replace(/\D/g, ''), c.notes, c.code].filter(Boolean).join(' '),
   )
 }
 
@@ -264,6 +266,74 @@ if (!clientColumns.some((c) => c.name === 'maintenance_price')) {
 }
 if (!clientColumns.some((c) => c.name === 'maintenance_currency')) {
   db.exec(`ALTER TABLE clients ADD COLUMN maintenance_currency TEXT NOT NULL DEFAULT 'ARS' CHECK (maintenance_currency IN ('ARS', 'USD'))`)
+}
+
+// Pais (codigo ISO de 2 letras: Latinoamerica y Estados Unidos) y CUIL/CUIT (solo Argentina, opcional).
+for (const col of ['country', 'tax_id']) {
+  if (!clientColumns.some((c) => c.name === col)) db.exec(`ALTER TABLE clients ADD COLUMN ${col} TEXT`)
+}
+
+// Codigo de cliente: las 3 primeras letras de la empresa (o del contacto si no tiene empresa) y el numero de cliente
+// con ceros, por ejemplo PAN0007. Se asigna al crear el cliente y no cambia si despues se edita el nombre.
+if (!clientColumns.some((c) => c.name === 'code')) db.exec('ALTER TABLE clients ADD COLUMN code TEXT')
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_code ON clients(code)')
+
+export function clientCode(label: string, id: number): string {
+  const letters = normalizeText(label).replace(/[^a-z]/g, '').slice(0, 3).toUpperCase().padEnd(3, 'X')
+  return `${letters}${String(id).padStart(4, '0')}`
+}
+
+/** Da codigo a los clientes que todavia no lo tienen (los que ya existian, los de la importacion y los de la web). */
+export function fillClientCodes(): void {
+  const rows = db.prepare('SELECT id, name, company FROM clients WHERE code IS NULL').all() as {
+    id: number
+    name: string
+    company: string | null
+  }[]
+  if (!rows.length) return
+  const update = db.prepare('UPDATE clients SET code = ?, search_text = search_text || ? WHERE id = ?')
+  db.transaction(() => {
+    for (const r of rows) {
+      const code = clientCode(r.company || r.name, r.id)
+      update.run(code, ` ${code.toLowerCase()}`, r.id)
+    }
+  })()
+}
+fillClientCodes()
+
+// Servicios de cada cliente (web, CRM, mantenimiento...), cada uno con su estado: posible cliente, propuesta enviada,
+// cliente o rechazado. `price` es el precio de lista que tenia la tabla de precios al cargarlo (centavos) y el descuento
+// porcentual dura `discount_months` meses (NULL = todo el periodo). El plan de mantenimiento, el precio y la marca de
+// "posible cliente" de la tabla clients se calculan a partir de estas filas (routes/clients.ts).
+const hadClientServices = !!db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'client_services'`).get()
+db.exec(`
+  CREATE TABLE IF NOT EXISTS client_services (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id        INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    product          TEXT NOT NULL CHECK (product IN ('landing', 'page', 'crmb', 'crmf', 'store', 'app', 'maint_page', 'maint_store', 'maint_crmb', 'maint_crm')),
+    status           TEXT NOT NULL DEFAULT 'prospect' CHECK (status IN ('prospect', 'proposal', 'client', 'rejected')),
+    price            INTEGER NOT NULL CHECK (price >= 0),
+    currency         TEXT NOT NULL DEFAULT 'ARS' CHECK (currency IN ('ARS', 'USD')),
+    discount_percent INTEGER NOT NULL DEFAULT 0 CHECK (discount_percent BETWEEN 0 AND 90),
+    discount_months  INTEGER CHECK (discount_months IS NULL OR discount_months BETWEEN 1 AND 120),
+    created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE (client_id, product)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_client_services_client ON client_services(client_id);
+`)
+if (!hadClientServices) {
+  // Lo que ya estaba cargado: el plan de mantenimiento de cada cliente pasa a ser un servicio de mantenimiento
+  // (cliente si ya lo era, posible cliente si no). Si no tenia precio cotizado se usa el de la lista por defecto.
+  db.exec(`
+    INSERT OR IGNORE INTO client_services (client_id, product, status, price, currency)
+    SELECT id,
+           CASE maintenance_plan WHEN 'static' THEN 'maint_page' WHEN 'server' THEN 'maint_store' WHEN 'crmb' THEN 'maint_crmb' ELSE 'maint_crm' END,
+           CASE WHEN prospect = 1 THEN 'prospect' ELSE 'client' END,
+           COALESCE(maintenance_price, CASE maintenance_plan WHEN 'static' THEN 6578800 WHEN 'server' THEN 9568200 WHEN 'crmb' THEN 9568200 ELSE 12398300 END),
+           maintenance_currency
+    FROM clients WHERE maintenance_plan IS NOT NULL
+  `)
 }
 
 // Pagos / cobros. Importes en centavos. `method` y `provider_ref` dejan lista la integracion con Mercado Pago:
@@ -346,6 +416,18 @@ db.exec(`
 // Logo de la empresa (ya reducido por la web): imagen PNG, JPEG o WebP como data URL. Nunca SVG.
 if (!(db.pragma('table_info(audits)') as { name: string }[]).some((c) => c.name === 'logo')) {
   db.exec('ALTER TABLE audits ADD COLUMN logo TEXT')
+}
+// Una entrada puede tener los dos servicios: la URL de la pagina y/o la direccion del servidor del CRM. Cada uno guarda su
+// ultimo resultado (JSON con estado, alertas, detalle, tiempos y certificado); `status` queda como el peor de los dos.
+// `url` (obligatoria desde antes) guarda la primera direccion, solo para compatibilidad.
+const auditColumns = db.pragma('table_info(audits)') as { name: string }[]
+if (!auditColumns.some((c) => c.name === 'page_url')) {
+  db.transaction(() => {
+    for (const col of ['page_url', 'crm_url', 'page_result', 'crm_result']) db.exec(`ALTER TABLE audits ADD COLUMN ${col} TEXT`)
+    // Lo cargado antes (una sola direccion y un tipo): pasa a ser la pagina, el CRM, o los dos si estaban marcados ambos.
+    db.exec(`UPDATE audits SET crm_url = url WHERE is_crm = 1`)
+    db.exec(`UPDATE audits SET page_url = url WHERE is_page = 1 OR is_crm = 0`)
+  })()
 }
 
 // Cada cobro automatico pertenece a una suscripcion; `rejected` marca el intento que el banco rechazo (sigue pendiente).

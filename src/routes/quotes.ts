@@ -2,7 +2,7 @@ import crypto from 'node:crypto'
 import { Router } from 'express'
 import { z } from 'zod'
 import { config } from '../config.js'
-import { clientSearchText, db } from '../db.js'
+import { clientSearchText, db, fillClientCodes } from '../db.js'
 import { sendSalesNotice } from '../mailer.js'
 import { sameOrigin } from '../middleware/guards.js'
 import { rateLimit } from '../middleware/rateLimit.js'
@@ -75,6 +75,7 @@ quotesRouter.post('/', sameOrigin, rateLimit({ windowMs: 60 * 60 * 1000, max: 8 
       expires,
     )
   })()
+  fillClientCodes() // el posible cliente recibe su codigo (3 letras de la empresa y su numero)
 
   emit('clients')
   emit('forms')

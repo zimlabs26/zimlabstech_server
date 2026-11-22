@@ -22,7 +22,7 @@ type Category = (typeof categories)[number]
 const plans = ['static', 'server', 'crmb', 'crmf'] as const
 type Plan = (typeof plans)[number]
 const categoryOfPlan: Record<Plan, Category> = { static: 'bronze', server: 'silver', crmb: 'gold', crmf: 'diamond' }
-const categoryFor = (plan: Plan | null): Category => (plan ? categoryOfPlan[plan] : 'bronze')
+export const categoryFor = (plan: Plan | null): Category => (plan ? categoryOfPlan[plan] : 'bronze')
 
 interface ClientRow {
   id: number
@@ -55,8 +55,8 @@ type ServiceProduct = (typeof serviceProducts)[number]
 const serviceStatuses = ['prospect', 'proposal', 'client', 'rejected'] as const
 
 /** Mantenimiento contratado -> plan del cliente (de ahi salen su categoria y el precio del debito automatico). */
-const planOfService: Partial<Record<ServiceProduct, Plan>> = { maint_page: 'static', maint_store: 'server', maint_crmb: 'crmb', maint_crm: 'crmf' }
-const planRank: Record<Plan, number> = { static: 1, server: 2, crmb: 3, crmf: 4 }
+export const planOfService: Partial<Record<ServiceProduct, Plan>> = { maint_page: 'static', maint_store: 'server', maint_crmb: 'crmb', maint_crm: 'crmf' }
+export const planRank: Record<Plan, number> = { static: 1, server: 2, crmb: 3, crmf: 4 }
 
 interface ServiceRow {
   client_id: number

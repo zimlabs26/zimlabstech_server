@@ -637,3 +637,25 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
   );
 `)
+
+// Ajustes del dashboard.
+//  - app_settings: valores sueltos (hoy, el objetivo anual: clave "annual_goal:AAAA", valor en centavos de ARS).
+//  - income_adjustments: plata que entro a Mercado Pago pero NO es ganancia (aportes de los socios, dinero que entro y salio).
+//    Se resta de los ingresos del mes (AAAA-MM) para que el resultado no se infle. Importes en centavos de ARS.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS app_settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS income_adjustments (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    month      TEXT NOT NULL,                    -- AAAA-MM
+    amount     INTEGER NOT NULL CHECK (amount > 0),
+    note       TEXT NOT NULL DEFAULT '',
+    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_income_adjustments_month ON income_adjustments(month);
+`)

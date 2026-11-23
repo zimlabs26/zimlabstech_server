@@ -1,10 +1,14 @@
 import { Router } from 'express'
+import { z } from 'zod'
 import type { SessionUser } from '../auth/sessions.js'
 import { db } from '../db.js'
 import { captureError } from '../errorlog.js'
 import { mpEnabled } from '../mercadopago.js'
 import { canRetry, getMpSummary, isStale, isSyncing, startSync, type MpSummary } from '../mpreports.js'
-import { requireAdmin, requireUser } from '../middleware/guards.js'
+import { requireAdmin, requireUser, sameOrigin } from '../middleware/guards.js'
+import { rateLimit } from '../middleware/rateLimit.js'
+import { adjustmentsByMonth, getGoal, getPipeline, setGoal } from '../pipeline.js'
+import { emit } from '../realtime.js'
 import { costsForMonth, type ExpenseRow } from './expenses.js'
 
 export const dashboardRouter = Router()
@@ -136,15 +140,36 @@ dashboardRouter.get('/', (_req, res) => {
     .prepare('SELECT id, name, amount, frequency, start_month, end_month, note FROM expenses')
     .all() as unknown as ExpenseRow[]
   const mpIncome = getMpSummary()?.income ?? {}
+  // Plata que entro a Mercado Pago pero no es ganancia (aportes de los socios, dinero que entro y salio): se resta de ese mes.
+  const adjustments = adjustmentsByMonth()
+  const incomeOf = (m: string, fallback: number) => Math.max(0, (mpIncome[m] ?? fallback) - (adjustments[m] ?? 0))
   const monthly = months.map((m) => ({
     month: m,
     // Los ingresos salen de los reportes de Mercado Pago (todo lo que entro: pagos y transferencias); sin datos, de los pagos del CRM.
-    paid: mpIncome[m] ?? paidBy.get(m) ?? 0,
+    paid: incomeOf(m, paidBy.get(m) ?? 0),
     expected: dueBy.get(m) ?? 0,
     costs: costsForMonth(expenseRows, m),
   }))
   const costsMonth = costsForMonth(expenseRows, month)
-  const collectedNow = mpIncome[month] ?? collectedMonth.ARS
+  const collectedNow = incomeOf(month, collectedMonth.ARS)
+
+  /* ---------- Objetivo anual y pipeline ---------- */
+
+  const year = now.getUTCFullYear()
+  // Cobrado en el ano (ya sin los ajustes): de los reportes de Mercado Pago, y de los pagos del CRM en los meses que no estan en ellos.
+  const crmYear = new Map(
+    (
+      db
+        .prepare(`SELECT substr(paid_at, 1, 7) AS m, SUM(amount) AS total FROM payments WHERE status = 'paid' AND currency = 'ARS' AND substr(paid_at, 1, 4) = ? GROUP BY m`)
+        .all(String(year)) as { m: string; total: number }[]
+    ).map((r) => [r.m, r.total]),
+  )
+  let collectedYear = 0
+  for (let i = 1; i <= now.getUTCMonth() + 1; i++) {
+    const m = `${year}-${String(i).padStart(2, '0')}`
+    collectedYear += incomeOf(m, crmYear.get(m) ?? 0)
+  }
+  const goal = { year, amount: getGoal(year), collectedYear }
 
   /* ---------- Requiere atencion ---------- */
 
@@ -179,6 +204,8 @@ dashboardRouter.get('/', (_req, res) => {
   res.json({
     clients,
     admin: {
+      goal,
+      pipeline: getPipeline(),
       debits,
       // Resultado del mes (en pesos): lo cobrado menos los costos fijos. Puede ser negativo (perdida).
       money: { collectedMonth: { ...collectedMonth, ARS: collectedNow }, pending, overdue, mrr, costsMonth, resultMonth: collectedNow - costsMonth },
@@ -221,4 +248,74 @@ dashboardRouter.get('/balance', requireAdmin, (_req, res) => {
     return
   }
   res.json({ status: isSyncing() || canRetry() ? 'syncing' : 'error' } satisfies BalanceReply)
+})
+
+/* ---------- Objetivo anual ---------- */
+
+const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 240 })
+
+/** Objetivo del ano en curso, en centavos de ARS. 0 = sin objetivo. */
+dashboardRouter.put('/goal', requireAdmin, sameOrigin, limiter, (req, res) => {
+  const parsed = z.object({ amount: z.number().int().min(0).max(100_000_000_000_00) }).safeParse(req.body)
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid_input', field: 'amount' })
+    return
+  }
+  const year = new Date().getUTCFullYear()
+  setGoal(year, parsed.data.amount)
+  emit('payments', { adminsOnly: true, exceptCid: res.locals.cid })
+  res.json({ goal: { year, amount: getGoal(year) } })
+})
+
+/* ---------- Ajustes de ingresos ---------- */
+
+interface AdjustmentRow {
+  id: number
+  month: string
+  amount: number
+  note: string
+}
+
+const toAdjustment = (r: AdjustmentRow) => ({ id: r.id, month: r.month, amount: r.amount, note: r.note })
+
+const adjustmentSchema = z.object({
+  month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/),
+  /** Centavos de ARS. */
+  amount: z.number().int().positive().max(100_000_000_000_00),
+  note: z.string().trim().max(300).optional(),
+})
+
+/** Dinero que entro a Mercado Pago y no es ganancia (aportes, plata que entro y salio). Se resta de los ingresos de su mes. */
+dashboardRouter.get('/adjustments', requireAdmin, (_req, res) => {
+  const rows = db.prepare('SELECT id, month, amount, note FROM income_adjustments ORDER BY month DESC, id DESC LIMIT 500').all() as unknown as AdjustmentRow[]
+  res.json({ adjustments: rows.map(toAdjustment) })
+})
+
+dashboardRouter.post('/adjustments', requireAdmin, sameOrigin, limiter, (req, res) => {
+  const parsed = adjustmentSchema.safeParse(req.body)
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid_input', field: String(parsed.error.issues[0]?.path[0] ?? 'amount') })
+    return
+  }
+  const a = parsed.data
+  const user = res.locals.user as SessionUser
+  const result = db.prepare('INSERT INTO income_adjustments (month, amount, note, created_by) VALUES (?, ?, ?, ?)').run(a.month, a.amount, a.note ?? '', user.id)
+  const row = db.prepare('SELECT id, month, amount, note FROM income_adjustments WHERE id = ?').get(Number(result.lastInsertRowid)) as unknown as AdjustmentRow
+  emit('payments', { adminsOnly: true, exceptCid: res.locals.cid })
+  res.status(201).json({ adjustment: toAdjustment(row) })
+})
+
+dashboardRouter.delete('/adjustments/:id', requireAdmin, sameOrigin, limiter, (req, res) => {
+  const id = z.coerce.number().int().positive().safeParse(req.params.id)
+  if (!id.success) {
+    res.status(400).json({ error: 'invalid_input' })
+    return
+  }
+  const result = db.prepare('DELETE FROM income_adjustments WHERE id = ?').run(id.data)
+  if (result.changes === 0) {
+    res.status(404).json({ error: 'not_found' })
+    return
+  }
+  emit('payments', { adminsOnly: true, exceptCid: res.locals.cid })
+  res.status(204).end()
 })

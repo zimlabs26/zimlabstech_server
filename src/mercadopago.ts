@@ -100,6 +100,9 @@ export const createPreapproval = (input: {
 export const cancelPreapproval = (id: string): Promise<Preapproval> =>
   mp<Preapproval>('PUT', `/preapproval/${encodeURIComponent(id)}`, { status: 'cancelled' })
 
+/** Antiguedad maxima (y adelanto maximo) de la firma de un aviso. */
+const SIGNATURE_TOLERANCE_MS = 10 * 60 * 1000
+
 /**
  * Valida la firma que Mercado Pago agrega a cada aviso (cabecera x-signature = "ts=...,v1=...").
  * v1 es el HMAC-SHA256 (con la clave secreta del webhook) de "id:<data.id>;request-id:<x-request-id>;ts:<ts>;".
@@ -115,6 +118,14 @@ export function verifySignature(xSignature: string | undefined, xRequestId: stri
   const ts = parts.get('ts')
   const v1 = parts.get('v1')
   if (!ts || !v1) return false
+
+  // Ventana de tiempo: un aviso firmado hace mas de 10 minutos (o con fecha del futuro) no sirve, asi una captura de un
+  // aviso valido no se puede volver a enviar. Mercado Pago manda `ts` en milisegundos (o en segundos en algunas
+  // versiones). Si un aviso legitimo llegara tarde, la conciliacion horaria con Mercado Pago igual lo recupera.
+  const sent = Number(ts)
+  if (!Number.isFinite(sent) || sent <= 0) return false
+  const sentMs = sent < 1e12 ? sent * 1000 : sent
+  if (Math.abs(Date.now() - sentMs) > SIGNATURE_TOLERANCE_MS) return false
 
   // Segun la documentacion, un id alfanumerico se firma en minusculas.
   const id = /^[a-z0-9]+$/i.test(dataId) ? dataId.toLowerCase() : dataId

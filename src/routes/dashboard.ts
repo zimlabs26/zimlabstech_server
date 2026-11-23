@@ -165,11 +165,14 @@ dashboardRouter.get('/', (_req, res) => {
     ).map((r) => [r.m, r.total]),
   )
   let collectedYear = 0
+  let costsYear = 0
   for (let i = 1; i <= now.getUTCMonth() + 1; i++) {
     const m = `${year}-${String(i).padStart(2, '0')}`
     collectedYear += incomeOf(m, crmYear.get(m) ?? 0)
+    costsYear += costsForMonth(expenseRows, m)
   }
-  const goal = { year, amount: getGoal(year), collectedYear }
+  // El resultado del ano (cobrado menos costos) puede ser negativo: la plata que pusieron los socios no es ganancia.
+  const goal = { year, amount: getGoal(year), collectedYear, costsYear }
 
   /* ---------- Requiere atencion ---------- */
 

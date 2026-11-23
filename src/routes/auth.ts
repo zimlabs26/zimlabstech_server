@@ -1,6 +1,6 @@
 import express, { Router, type Response } from 'express'
 import { z } from 'zod'
-import { burnTime, hashPassword, verifyPassword } from '../auth/password.js'
+import { burnTime, hashPassword, needsRehash, verifyPassword } from '../auth/password.js'
 import {
   accountBlock,
   clearSessionCookie,
@@ -88,6 +88,16 @@ authRouter.post('/login', sameOrigin, loginFloodLimiter, async (req, res) => {
   // Entrar bien limpia el contador de ESTE correo desde ESTA IP. El de la IP sola no se limpia: asi una cuenta
   // valida no sirve para reiniciar el freno mientras se prueban otras.
   loginFailuresByPair.reset(pairKey)
+
+  // Hash guardado con un costo menor al actual: es el unico momento en que se conoce la contrasena, asi que se actualiza
+  // aca. Un fallo no impide entrar: el hash viejo sigue siendo valido.
+  if (needsRehash(user.password_hash)) {
+    try {
+      db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(await hashPassword(password), user.id)
+    } catch {
+      /* se reintenta en el proximo inicio de sesion */
+    }
+  }
 
   // Con la contrasena correcta se avisa por que no puede entrar (antes no: asi no se revela que la cuenta existe).
   const block = accountBlock(user)

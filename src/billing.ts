@@ -10,6 +10,7 @@ import {
   updatePreapprovalAmount,
   type AuthorizedPayment,
 } from './mercadopago.js'
+import { sendBillingNotices } from './notices.js'
 import { emit } from './realtime.js'
 
 /**
@@ -208,6 +209,8 @@ export async function settleAuthorizedPayment(authorizedId: string): Promise<voi
   applyAuthorizedPayment(sub, ap)
   // Actualiza la proxima fecha y deja programado el pendiente del mes siguiente.
   await syncSubscription(sub.mp_id)
+  // El dia del cobro: avisa al cliente que se hizo correctamente (no espera ni frena la respuesta al webhook).
+  void sendBillingNotices()
 }
 
 /**
@@ -240,4 +243,6 @@ export async function reconcile(): Promise<void> {
       captureError(error, { kind: 'mercadopago', message: 'Conciliacion de Mercado Pago fallida para una suscripcion' })
     }
   }
+  // Si un aviso de cobro se perdio, aca se detecta el cobro y el cliente igual recibe su confirmacion.
+  void sendBillingNotices()
 }

@@ -328,6 +328,120 @@ export async function sendWelcomeEmail(to: string, tempPassword: string): Promis
   }
 }
 
+/* ---------- Avisos del debito automatico al cliente ---------- */
+
+const PLAN_NAMES: Record<string, string> = {
+  static: 'Cuidado de web estática',
+  server: 'Cuidado de web interactiva',
+  crmb: 'Cuidado de CRM básico',
+  crmf: 'Cuidado de CRM completo',
+}
+
+export interface ChargeInfo {
+  clientName: string
+  /** Codigo del plan de mantenimiento (concepto del cobro). */
+  plan: string
+  /** Centavos de ARS. */
+  amount: number
+  /** AAAA-MM-DD */
+  date: string
+}
+
+const peso = (cents: number) => new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS' }).format(cents / 100)
+const longDate = (iso: string) => new Date(`${iso}T12:00:00`).toLocaleDateString('es-AR', { dateStyle: 'long' })
+const clean = (s: string) => s.replace(/[\r\n]+/g, ' ')
+
+async function sendToClient(to: string, subject: string, text: string, html: string, what: string): Promise<MailStatus> {
+  if (!transporter) return 'not_configured'
+  try {
+    await transporter.sendMail({
+      from: { name: config.mailFromName, address: config.mailUser },
+      to,
+      // Si el cliente responde, le llega a ventas.
+      replyTo: config.salesEmail,
+      subject,
+      text,
+      html,
+      attachments: attachments(),
+    })
+    return 'sent'
+  } catch (error) {
+    return failure(what, error)
+  }
+}
+
+const clientFooter = () =>
+  `Este es un aviso automático de ${escapeHtml(config.mailFromName)} sobre tu débito automático de Mercado Pago. Si tenés dudas, respondé este correo o escribinos a <a href="mailto:${escapeHtml(config.salesEmail)}" style="color:${C.accent}">${escapeHtml(config.salesEmail)}</a>.`
+
+/** Una semana antes: avisa que se va a hacer el cobro del debito automatico. */
+export function sendChargeReminder(to: string, c: ChargeInfo): Promise<MailStatus> {
+  const plan = PLAN_NAMES[c.plan] ?? 'Mantenimiento'
+  const date = longDate(c.date)
+  const text = [
+    `Hola ${clean(c.clientName)},`,
+    '',
+    `Te avisamos que el ${date} se va a realizar el cobro de tu débito automático.`,
+    '',
+    `Servicio: ${plan}`,
+    `Importe: ${peso(c.amount)}`,
+    `Fecha del cobro: ${date}`,
+    '',
+    'Se descuenta solo de la tarjeta que registraste en Mercado Pago. No tenés que hacer nada; solo asegurate de tener saldo disponible.',
+    `Si tenés dudas, escribinos a ${config.salesEmail}.`,
+  ].join('\n')
+
+  const html = layout({
+    preheader: `El ${date} se cobra tu débito automático de ${peso(c.amount)}.`,
+    title: 'Aviso de cobro próximo',
+    body: [
+      h1('Se acerca tu próximo cobro'),
+      p(`Hola ${escapeHtml(c.clientName)}, te avisamos con una semana de anticipación que se va a realizar el cobro de tu <strong>débito automático</strong>.`),
+      panel([
+        { label: 'Servicio', value: plan },
+        { label: 'Importe', value: peso(c.amount) },
+        { label: 'Fecha del cobro', value: date },
+      ]),
+      note('Se descuenta solo de la tarjeta que registraste en Mercado Pago. <strong>No tenés que hacer nada</strong>; solo asegurate de tener saldo disponible ese día.'),
+    ].join(''),
+    footer: clientFooter(),
+  })
+  return sendToClient(to, `Aviso: el ${date} se realizará el cobro de tu débito automático`, text, html, 'el aviso de cobro próximo')
+}
+
+/** El dia del cobro: confirma que se hizo correctamente. */
+export function sendChargePaid(to: string, c: ChargeInfo): Promise<MailStatus> {
+  const plan = PLAN_NAMES[c.plan] ?? 'Mantenimiento'
+  const date = longDate(c.date)
+  const text = [
+    `Hola ${clean(c.clientName)},`,
+    '',
+    'El cobro de tu débito automático se realizó correctamente. ¡Gracias!',
+    '',
+    `Servicio: ${plan}`,
+    `Importe cobrado: ${peso(c.amount)}`,
+    `Fecha: ${date}`,
+    '',
+    `Si tenés dudas, escribinos a ${config.salesEmail}.`,
+  ].join('\n')
+
+  const html = layout({
+    preheader: `Cobro realizado correctamente: ${peso(c.amount)}.`,
+    title: 'Cobro realizado',
+    body: [
+      h1('Cobro realizado correctamente'),
+      p(`Hola ${escapeHtml(c.clientName)}, el cobro de tu <strong>débito automático</strong> se realizó con éxito. ¡Gracias!`),
+      panel([
+        { label: 'Servicio', value: plan },
+        { label: 'Importe cobrado', value: peso(c.amount) },
+        { label: 'Fecha', value: date },
+      ]),
+      p('El próximo cobro te lo vamos a avisar con una semana de anticipación.', true),
+    ].join(''),
+    footer: clientFooter(),
+  })
+  return sendToClient(to, 'Cobro realizado correctamente', text, html, 'el aviso de cobro realizado')
+}
+
 /**
  * Aviso a ventas: alguien dejo sus datos en la web para contratar un plan. El Reply-To es la persona, asi que
  * responder el correo le escribe directo. No lanza: un fallo de correo no debe impedir que el pedido quede en el CRM.

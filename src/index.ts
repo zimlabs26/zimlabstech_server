@@ -23,6 +23,7 @@ import { exportRouter } from './routes/export.js'
 import { expensesRouter } from './routes/expenses.js'
 import { pricingRouter, promotionsRouter } from './routes/promotions.js'
 import { reconcile } from './billing.js'
+import { sendBillingNotices } from './notices.js'
 import { auditsRouter, tickAuditSchedule } from './routes/audits.js'
 import { paymentsRouter } from './routes/payments.js'
 import { subscriptionsRouter } from './routes/subscriptions.js'
@@ -187,6 +188,9 @@ setInterval(purgeExpiredSessions, 60 * 60 * 1000).unref()
 // Debito automatico: conciliacion de respaldo con Mercado Pago (por si se perdio algun aviso): al arrancar y cada hora.
 setTimeout(() => void reconcile(), 30_000).unref()
 setInterval(() => void reconcile(), 60 * 60 * 1000).unref()
+// Avisos por correo al cliente: recordatorio una semana antes del cobro y confirmacion el dia del cobro (ver notices.ts).
+setTimeout(() => void sendBillingNotices(), 45_000).unref()
+setInterval(() => void sendBillingNotices(), 60 * 60 * 1000).unref()
 // Auditoria: la corrida de todo es a pedido o programada (cada dia, 7 dias, 15 dias o 1 mes); cada 15 minutos se mira si toca.
 setTimeout(() => void tickAuditSchedule(), 60_000).unref()
 setInterval(() => void tickAuditSchedule(), 15 * 60 * 1000).unref()

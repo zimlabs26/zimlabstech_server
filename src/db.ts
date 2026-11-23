@@ -659,3 +659,15 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_income_adjustments_month ON income_adjustments(month);
 `)
+
+// Avisos por correo al cliente sobre el debito automatico (notices.ts): uno por cobro y tipo, asi nunca se repiten.
+//  - reminder: "en una semana se te cobra" (a mas tardar 7 dias antes del vencimiento).
+//  - paid:     "el cobro se hizo correctamente" (el dia del cobro).
+db.exec(`
+  CREATE TABLE IF NOT EXISTS billing_notices (
+    payment_id INTEGER NOT NULL REFERENCES payments(id) ON DELETE CASCADE,
+    kind       TEXT NOT NULL CHECK (kind IN ('reminder', 'paid')),
+    sent_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (payment_id, kind)
+  );
+`)

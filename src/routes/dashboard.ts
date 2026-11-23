@@ -7,7 +7,7 @@ import { mpEnabled } from '../mercadopago.js'
 import { canRetry, getMpSummary, isStale, isSyncing, startSync, type MpSummary } from '../mpreports.js'
 import { requireAdmin, requireUser, sameOrigin } from '../middleware/guards.js'
 import { rateLimit } from '../middleware/rateLimit.js'
-import { adjustmentsByMonth, getGoal, getPipeline, setGoal } from '../pipeline.js'
+import { adjustmentsByMonth, getGoal, getInitialResult, getPipeline, setGoal, setInitialResult } from '../pipeline.js'
 import { emit } from '../realtime.js'
 import { costsForMonth, type ExpenseRow } from './expenses.js'
 
@@ -172,7 +172,8 @@ dashboardRouter.get('/', (_req, res) => {
     costsYear += costsForMonth(expenseRows, m)
   }
   // El resultado del ano (cobrado menos costos) puede ser negativo: la plata que pusieron los socios no es ganancia.
-  const goal = { year, amount: getGoal(year), collectedYear, costsYear }
+  // `initial`: contador con el que arranca el resultado del ano (puede ser negativo).
+  const goal = { year, amount: getGoal(year), collectedYear, costsYear, initial: getInitialResult(year) }
 
   /* ---------- Requiere atencion ---------- */
 
@@ -257,17 +258,26 @@ dashboardRouter.get('/balance', requireAdmin, (_req, res) => {
 
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 240 })
 
-/** Objetivo del ano en curso, en centavos de ARS. 0 = sin objetivo. */
+/**
+ * Objetivo del ano en curso (centavos de ARS; 0 = sin objetivo) y, opcional, el contador inicial del resultado del ano
+ * (puede ser negativo; 0 = sin contador inicial).
+ */
 dashboardRouter.put('/goal', requireAdmin, sameOrigin, limiter, (req, res) => {
-  const parsed = z.object({ amount: z.number().int().min(0).max(100_000_000_000_00) }).safeParse(req.body)
+  const parsed = z
+    .object({
+      amount: z.number().int().min(0).max(100_000_000_000_00),
+      initial: z.number().int().min(-100_000_000_000_00).max(100_000_000_000_00).optional(),
+    })
+    .safeParse(req.body)
   if (!parsed.success) {
-    res.status(400).json({ error: 'invalid_input', field: 'amount' })
+    res.status(400).json({ error: 'invalid_input', field: String(parsed.error.issues[0]?.path[0] ?? 'amount') })
     return
   }
   const year = new Date().getUTCFullYear()
   setGoal(year, parsed.data.amount)
+  if (parsed.data.initial !== undefined) setInitialResult(year, parsed.data.initial)
   emit('payments', { adminsOnly: true, exceptCid: res.locals.cid })
-  res.json({ goal: { year, amount: getGoal(year) } })
+  res.json({ goal: { year, amount: getGoal(year), initial: getInitialResult(year) } })
 })
 
 /* ---------- Ajustes de ingresos ---------- */

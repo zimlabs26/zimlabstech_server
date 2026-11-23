@@ -99,6 +99,25 @@ export function setGoal(year: number, amount: number): void {
   db.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(goalKey(year), String(amount))
 }
 
+/* ---------- Contador inicial del ano ---------- */
+
+const initialKey = (year: number) => `initial_result:${year}`
+
+/** Con lo que arranca el resultado del ano, en centavos de ARS. Puede ser negativo (por ejemplo, plata puesta por los socios). */
+export function getInitialResult(year: number): number {
+  const row = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(initialKey(year)) as { value: string } | undefined
+  const n = row ? Number(row.value) : 0
+  return Number.isSafeInteger(n) ? n : 0
+}
+
+export function setInitialResult(year: number, amount: number): void {
+  if (amount === 0) {
+    db.prepare('DELETE FROM app_settings WHERE key = ?').run(initialKey(year))
+    return
+  }
+  db.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(initialKey(year), String(amount))
+}
+
 /* ---------- Ajustes de ingresos ---------- */
 
 /** Lo que hay que restar a los ingresos de cada mes (AAAA-MM), en centavos. */

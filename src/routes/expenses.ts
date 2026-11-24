@@ -43,9 +43,12 @@ const toExpense = (r: ExpenseRow) => ({
 /**
  * Cuanto pesa un costo en un mes (AAAA-MM), en centavos.
  *  - monthly: el importe completo cada mes entre inicio y fin.
- *  - yearly:  un doceavo por mes (se reparte el anio para que la ganancia no dé saltos).
+ *  - yearly:  el importe completo solo en el mes en que se paga (el de inicio) y en cada aniversario; no es un costo
+ *             mensual, ese gasto ya se asumio de una vez.
  *  - once:    el importe completo solo en su mes.
  */
+const monthIndex = (ym: string): number => Number(ym.slice(0, 4)) * 12 + Number(ym.slice(5, 7)) - 1
+
 export function costsForMonth(rows: ExpenseRow[], month: string): number {
   let total = 0
   for (const e of rows) {
@@ -54,7 +57,11 @@ export function costsForMonth(rows: ExpenseRow[], month: string): number {
       continue
     }
     if (e.start_month > month || (e.end_month !== null && e.end_month < month)) continue
-    total += e.frequency === 'yearly' ? Math.round(e.amount / 12) : e.amount
+    if (e.frequency === 'yearly') {
+      if ((monthIndex(month) - monthIndex(e.start_month)) % 12 === 0) total += e.amount
+      continue
+    }
+    total += e.amount
   }
   return total
 }

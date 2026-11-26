@@ -13,6 +13,7 @@ import { captureError } from './errorlog.js'
 import { requireUser } from './middleware/guards.js'
 import { openConnection } from './realtime.js'
 import { adminRouter } from './routes/admin.js'
+import { analyticsRouter } from './routes/analytics.js'
 import { authRouter } from './routes/auth.js'
 import { passkeysRouter } from './routes/passkeys.js'
 import { quotesRouter } from './routes/quotes.js'
@@ -43,11 +44,14 @@ app.use(
     contentSecurityPolicy: {
       directives: {
         // Los scripts en linea de las paginas (tema antes del primer dibujo) se permiten por su hash, no en general.
-        'script-src': ["'self'", ...inlineScriptHashes()],
+        // Google Tag Manager / Analytics (la web publica los carga; el CRM y el login no).
+        'script-src': ["'self'", 'https://www.googletagmanager.com', ...inlineScriptHashes()],
+        'connect-src': ["'self'", 'https://*.google-analytics.com', 'https://*.analytics.google.com', 'https://*.googletagmanager.com'],
+        'frame-src': ['https://www.googletagmanager.com'],
         // Ninguna pagina se muestra dentro de otra (ni de este mismo sitio): evita el clickjacking.
         'frame-ancestors': ["'none'"],
         // blob: para la vista previa del recorte de la foto de perfil.
-        'img-src': ["'self'", 'data:', 'blob:'],
+        'img-src': ["'self'", 'data:', 'blob:', 'https://*.google-analytics.com', 'https://*.googletagmanager.com'],
         // En desarrollo (http://localhost) el navegador no debe forzar https.
         'upgrade-insecure-requests': config.isProd ? [] : null,
       },
@@ -139,6 +143,7 @@ app.use('/api/pricing', pricingRouter) // publico: lo que muestra la web
 app.use('/api/promotions', promotionsRouter)
 app.use('/api/subscriptions', subscriptionsRouter)
 app.use('/api/audits', auditsRouter)
+app.use('/api/analytics', analyticsRouter) // solo administradores: resumen de Google Analytics
 // Publico (lo llama Mercado Pago): cada aviso se valida con la firma del webhook.
 app.use('/api/webhooks', webhooksRouter)
 

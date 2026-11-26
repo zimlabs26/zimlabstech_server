@@ -75,6 +75,13 @@ export const config = {
   mailFromName: process.env.MAIL_FROM_NAME?.trim() || 'Zim Labs',
   /** Casilla que recibe el aviso de cada pedido de proyecto que llega desde la web. */
   salesEmail: process.env.SALES_EMAIL?.trim() || 'ventas@zimlabstech.com',
+  /**
+   * Google Analytics 4 (solo lectura, para la seccion Analiticas del CRM). Hace falta el ID numerico de la propiedad y una
+   * cuenta de servicio con acceso de "Lector" a esa propiedad. La clave privada puede pegarse con "\n" literales.
+   */
+  gaPropertyId: (process.env.GA_PROPERTY_ID ?? '').replace(/\D/g, ''),
+  gaClientEmail: process.env.GA_CLIENT_EMAIL?.trim() ?? '',
+  gaPrivateKey: (process.env.GA_PRIVATE_KEY ?? '').trim().replace(/^["']|["']$/g, '').replace(/\\n/g, '\n'),
   cookieName: 'zsid',
   sessionDays: 7,
 } as const

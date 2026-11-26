@@ -525,6 +525,13 @@ if (!taskColumns.some((c) => c.name === 'client_id')) {
 }
 db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_client ON tasks(client_id)')
 
+// Tareas privadas: con `owner_id` la tarea es personal y solo la ve (y la mueve) esa persona; NULL = tablero compartido.
+// Si se elimina la cuenta, se van con ella.
+if (!taskColumns.some((c) => c.name === 'owner_id')) {
+  db.exec('ALTER TABLE tasks ADD COLUMN owner_id INTEGER REFERENCES users(id) ON DELETE CASCADE')
+}
+db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_owner ON tasks(owner_id)')
+
 // Registro de errores (del servidor y de la web). Los iguales se agrupan por `fingerprint` y suben `count`.
 // Nunca guarda cuerpos de peticiones: solo el mensaje, el detalle tecnico y donde ocurrio (ya enmascarados).
 db.exec(`

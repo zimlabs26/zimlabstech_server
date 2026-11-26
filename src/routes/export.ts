@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { z } from 'zod'
+import type { SessionUser } from '../auth/sessions.js'
 import { db } from '../db.js'
 import { requireAdmin } from '../middleware/guards.js'
 import { rateLimit } from '../middleware/rateLimit.js'
@@ -63,7 +64,7 @@ const labels = {
 
 type Row = (string | number | null)[]
 
-function rowsFor(dataset: Dataset, lang: Lang): Row[] {
+function rowsFor(dataset: Dataset, lang: Lang, userId: number): Row[] {
   const l = labels[lang]
   switch (dataset) {
     case 'clients':
@@ -113,16 +114,17 @@ function rowsFor(dataset: Dataset, lang: Lang): Row[] {
         db
           .prepare(
             `SELECT t.title, t.description, t.status, c.name AS client, t.created_at AS createdAt, t.updated_at AS updatedAt
-             FROM tasks t LEFT JOIN clients c ON c.id = t.client_id ORDER BY t.id DESC LIMIT ?`,
+             FROM tasks t LEFT JOIN clients c ON c.id = t.client_id
+             WHERE t.owner_id IS NULL OR t.owner_id = ? ORDER BY t.id DESC LIMIT ?`,
           )
-          .all(MAX_ROWS) as Record<string, string | number | null>[]
+          .all(userId, MAX_ROWS) as Record<string, string | number | null>[]
       ).map((r) => [r.title, r.description, l.status[r.status as 'todo' | 'doing' | 'done'] ?? r.status, r.client, r.createdAt, r.updatedAt])
   }
 }
 
 /** CSV completo de un conjunto de datos. BOM al inicio: Excel reconoce las tildes (UTF-8). */
-function csvFor(dataset: Dataset, lang: Lang): Buffer {
-  const lines = [labels[lang][dataset].map((h) => csvCell(h)).join(','), ...rowsFor(dataset, lang).map((row) => row.map(csvCell).join(','))]
+function csvFor(dataset: Dataset, lang: Lang, userId: number): Buffer {
+  const lines = [labels[lang][dataset].map((h) => csvCell(h)).join(','), ...rowsFor(dataset, lang, userId).map((row) => row.map(csvCell).join(','))]
   return Buffer.from(`﻿${lines.join('\r\n')}\r\n`, 'utf8')
 }
 
@@ -146,6 +148,7 @@ exportRouter.get('/', limiter, (req, res) => {
 
   const chosen = datasets.filter((d) => requested.has(d))
   const { lang } = parsed.data
+  const userId = (res.locals.user as SessionUser).id
   const day = new Date().toISOString().slice(0, 10)
   const names = labels[lang].files
 
@@ -155,11 +158,11 @@ exportRouter.get('/', limiter, (req, res) => {
       'Content-Type': 'text/csv; charset=utf-8',
       'Content-Disposition': `attachment; filename="${names[chosen[0]]}-${day}.csv"`,
     })
-    res.send(csvFor(chosen[0], lang))
+    res.send(csvFor(chosen[0], lang, userId))
     return
   }
 
-  const zip = createZip(chosen.map((d) => ({ name: `${names[d]}.csv`, data: csvFor(d, lang) })))
+  const zip = createZip(chosen.map((d) => ({ name: `${names[d]}.csv`, data: csvFor(d, lang, userId) })))
   res.set({
     'Content-Type': 'application/zip',
     'Content-Disposition': `attachment; filename="${names.backup}-${day}.zip"`,
